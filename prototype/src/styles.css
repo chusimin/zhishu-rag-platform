@@ -251,7 +251,7 @@ code, .mono { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12p
 .chunk-card { border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; background: var(--surface); transition: border-color 0.15s, box-shadow 0.15s; }
 .chunk-card:hover { border-color: var(--primary-200); box-shadow: var(--shadow-sm); }
 .chunk-card header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; color: var(--text-4); }
-.chunk-card .idx { font-family: 'SF Mono', Menlo, monospace; color: var(--text-3); background: var(--bg); border-radius: 4px; padding: 0 6px; }
+.chunk-card .idx { white-space: nowrap; font-family: 'SF Mono', Menlo, monospace; color: var(--text-3); background: var(--bg); border-radius: 4px; padding: 0 6px; }
 .chunk-card .body { white-space: pre-wrap; color: var(--text-2); font-size: 13px; line-height: 1.7; word-break: break-word; }
 .chunk-card .child { border-left: 2px solid var(--primary-200); padding: 4px 0 4px 10px; margin-top: 8px; background: var(--primary-50); border-radius: 0 6px 6px 0; }
 .qa-q { font-weight: 600; color: var(--text-1); margin-bottom: 4px; }
@@ -327,3 +327,5 @@ code, .mono { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12p
 .bar-chart > div:hover { background: var(--primary); }
 .bar-chart > div span { position: absolute; bottom: -20px; left: 50%; transform: translateX(-50%); font-size: 11px; color: var(--text-4); white-space: nowrap; }
 .score { font-family: 'SF Mono', Menlo, monospace; font-size: 12px; }
+.spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
