@@ -4,6 +4,10 @@
 
 核心原则：**人与 AI 使用同一套 `fde.app/v1` 协议和控制 API，预览不会隐式发布，业务端只运行已发布版本。**
 
+## 前端原型（v0.1，FastGPT 式重构方案）
+
+新版信息架构与交互原型在 [`prototype/`](prototype/README.md)，双击 `prototype/知枢-前端原型.html` 即可离线浏览。现状审计与后端差距见 [`docs/AUDIT.md`](docs/AUDIT.md)。
+
 ## 已实现能力
 
 - AI 应用设计室：自然语言生成 Manifest，支持字段级编辑与协议查看。

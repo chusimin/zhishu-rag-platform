@@ -125,6 +125,8 @@ export const APPS: AppItem[] = [
     knowledge: ['kb-product', 'kb-sales'],
     model: 'Qwen3-Max',
     stats: { runs7d: 486, users7d: 58, satisfaction: 85, hitRate: 0 },
+    opening: '告诉我产品、核心卖点和要发布的渠道，我会为每个渠道各写一版。',
+    suggestions: ['ES-200 储能柜，主打削峰填谷省电费，发公众号和小红书'],
   },
   {
     id: 'app-sales',
@@ -171,6 +173,8 @@ export const APPS: AppItem[] = [
     knowledge: [],
     model: 'DeepSeek-V3.2',
     stats: { runs7d: 233, users7d: 41, satisfaction: 89, hitRate: 0 },
+    opening: '把会议转写稿粘贴给我，我会整理出结论、待办事项和负责人。',
+    suggestions: ['整理 10-24 产品评审会纪要'],
   },
 ];
 
@@ -257,6 +261,15 @@ export const COLLECTIONS: Collection[] = [
   { id: 'c7', kbId: 'kb-product', name: '新品上市口径说明', source: 'text', ext: 'txt', method: 'semantic', chunks: 14, size: '6.2 千字', status: 'ready', updatedAt: '10-24 17:30', tags: ['口径'] },
   { id: 'c8', kbId: 'kb-product', name: '经销商培训手册.docx', source: 'file', ext: 'docx', method: 'qa', chunks: 0, size: '3.4 MB', status: 'queued', updatedAt: '今天 10:20', tags: [] },
 ];
+
+// 其余知识库复用同一组集合结构，仅替换文件名，避免在原型里维护多份数据。
+export const KB_FILE_NAMES: Record<string, string[]> = {
+  'kb-aftersale': ['售后服务政策 V2.1.docx', '退换货 FAQ.xlsx', '保修条款汇编.pdf', '发票开具说明.md'],
+  'kb-research': ['2026 储能行业年度报告.pdf', '工商业储能经济性测算.xlsx', '海外储能市场追踪.pdf', 'research.example.com/weekly', '专家访谈纪要 10-18.docx'],
+  'kb-legal': ['标准采购合同模板 V4.docx', '采购合同条款红线.xlsx', '历史审校意见汇编 2025.pdf', '销售合同模板 V3.docx', '扫描版框架协议（2019）.pdf'],
+  'kb-policy': ['差旅费用管理办法（2026 修订）.pdf', '员工手册 2026.docx', '采购管理制度.pdf', '考勤与休假制度', '报销流程说明.md'],
+  'kb-sales': ['成交案例复盘 2026H1.xlsx', '客户异议应对手册.docx', '竞品对比表.xlsx', '大客户拜访话术.pdf'],
+};
 
 export interface ChunkMethod {
   key: ChunkMethodKey;

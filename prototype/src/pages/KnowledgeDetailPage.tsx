@@ -5,7 +5,7 @@ import {
 import { useMemo, useState, type ReactNode } from 'react';
 import { Link, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom';
 import {
-  appById, CHUNK_METHODS, CHUNKS, COLLECTIONS, KB_TYPE_META, kbById, METHOD_NAME, MODELS, type ChunkItem, type ChunkMethodKey, type Collection,
+  appById, CHUNK_METHODS, CHUNKS, COLLECTIONS, KB_FILE_NAMES, KB_TYPE_META, kbById, METHOD_NAME, MODELS, type ChunkItem, type ChunkMethodKey, type Collection,
 } from '../data/mock';
 import { Dev, Drawer, Field, Icon, Modal, Slider, Switch, Tag, useToast } from '../components/ui';
 import { HealthTag } from './KnowledgeListPage';
@@ -74,7 +74,9 @@ function CollectionsView({ kbId }: { kbId: string }) {
   const [filter, setFilter] = useState<'all' | Collection['status']>('all');
   const [rechunk, setRechunk] = useState<Collection | null>(null);
   const [method, setMethod] = useState<ChunkMethodKey>('auto');
-  const rows = COLLECTIONS.filter((c) => (filter === 'all' || c.status === filter) && (!q || c.name.includes(q)));
+  const names = KB_FILE_NAMES[kbId];
+  const all = names ? COLLECTIONS.slice(0, names.length).map((c, i) => ({ ...c, name: names[i], source: names[i].includes('.example.com') ? 'web' as const : c.source, tags: [] })) : COLLECTIONS;
+  const rows = all.filter((c) => (filter === 'all' || c.status === filter) && (!q || c.name.includes(q)));
 
   return (
     <div className="page">
