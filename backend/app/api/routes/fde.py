@@ -537,6 +537,11 @@ async def _execute(app: QAApp, manifest: Manifest, version_id: str | None, paylo
             raise HTTPException(status_code=404, detail="会话不存在")
         history = list(await session.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at)))
     query = payload.message.strip() or next(iter(payload.input_values.values()), app.name)
+    # 用户确认副作用工具后会重发同一条消息：替换上一轮「待确认」的回复，而不是在会话里再追加一轮
+    awaiting_confirmation: Message | None = None
+    if payload.confirmed_tool_names and len(history) >= 2 and history[-2].role == "user" and history[-2].content == str(query) and history[-1].role == "assistant":
+        awaiting_confirmation = history[-1]
+        history = history[:-2]
     spans: list[dict[str, Any]] = []
     started_at = datetime.now(UTC)
     run_channel = _channel(context, channel)
@@ -577,9 +582,13 @@ async def _execute(app: QAApp, manifest: Manifest, version_id: str | None, paylo
         session.add(conversation)
         await session.flush()
     conversation.updated_at = utc_now()
-    user_message = Message(conversation_id=conversation.id, role="user", content=str(query), input_values=payload.input_values, app_version_id=version_id)
     assistant_message = Message(conversation_id=conversation.id, role="assistant", content=result["content"], citations=result["citations"], input_tokens=result["tokens"]["input"], output_tokens=result["tokens"]["output"], duration_ms=result["duration_ms"], simulated=result["simulated"], output_json=result["output_json"], app_version_id=version_id)
-    session.add_all([user_message, assistant_message])
+    if awaiting_confirmation is not None:
+        await session.delete(awaiting_confirmation)
+        session.add(assistant_message)
+    else:
+        user_message = Message(conversation_id=conversation.id, role="user", content=str(query), input_values=payload.input_values, app_version_id=version_id)
+        session.add_all([user_message, assistant_message])
     await session.flush()
     model_info = result.get("model") or {}
     log = QueryLog(

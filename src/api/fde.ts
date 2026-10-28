@@ -97,6 +97,8 @@ export const fdeApi = {
   preview: (id: string, payload: { message?: string; input_values: Record<string, unknown> }) => apiFetch<RunResult>(`/fde/apps/${id}/preview`, { method: 'POST', body: JSON.stringify(payload) }),
   run: (id: string, payload: { message?: string; input_values: Record<string, unknown>; conversation_id?: string; confirmed_tool_names?: string[] }) => apiFetch<RunResult>(`/fde/apps/${id}/run`, { method: 'POST', body: JSON.stringify(payload) }),
   version: (id: string, releaseNotes = '') => apiFetch<AppVersion>(`/fde/apps/${id}/versions`, { method: 'POST', body: JSON.stringify({ release_notes: releaseNotes }) }),
+  /** 固化草稿并发布，校验或门禁失败时不会留下版本；草稿未改动则复用最新版本。 */
+  release: (id: string, releaseNotes: string) => apiFetch<FDEApp>(`/fde/apps/${id}/release`, { method: 'POST', body: JSON.stringify({ release_notes: releaseNotes }) }),
   publish: (id: string, versionId?: string) => apiFetch<FDEApp>(`/fde/apps/${id}/publish`, { method: 'POST', body: JSON.stringify({ version_id: versionId ?? null }) }),
   rollback: (id: string, versionId: string) => apiFetch<FDEApp>(`/fde/apps/${id}/rollback`, { method: 'POST', body: JSON.stringify({ version_id: versionId }) }),
   unpublish: (id: string) => apiFetch<FDEApp>(`/fde/apps/${id}/unpublish`, { method: 'POST' }),

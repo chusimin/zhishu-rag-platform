@@ -123,9 +123,21 @@ export function ChatPanel({ appId, manifest, mode, shareToken, title, initialCon
 
   useEffect(() => { scroller.current?.scrollTo({ top: scroller.current.scrollHeight }); }, [msgs]);
 
-  const execute = async (message: string, inputs: Record<string, unknown>, confirmed: string[] = []) => {
-    const botId = crypto.randomUUID();
-    setMsgs((current) => [...current, { id: botId, role: 'bot', content: '', pending: true, request: { message, inputs } }]);
+  // 调试时增删表单字段：保留已填的值，为新字段补默认值，不打断当前对话
+  const fieldKeys = manifest.input_fields.map((field) => field.key).join(',');
+  useEffect(() => {
+    setValues((current) => {
+      const next: Record<string, unknown> = defaults(manifest);
+      for (const key of Object.keys(next)) if (key in current) next[key] = current[key];
+      return next;
+    });
+  }, [fieldKeys]);
+
+  /** confirmFor：确认副作用工具后，原地替换那条「待确认」回复，避免重复执行。 */
+  const execute = async (message: string, inputs: Record<string, unknown>, confirmed: string[] = [], confirmFor?: string) => {
+    const botId = confirmFor ?? crypto.randomUUID();
+    const placeholder: Msg = { id: botId, role: 'bot', content: '', pending: true, request: { message, inputs } };
+    setMsgs((current) => (confirmFor ? current.map((item) => (item.id === confirmFor ? placeholder : item)) : [...current, placeholder]));
     setBusy(true);
     const payload = { message, input_values: inputs, conversation_id: conversationId, confirmed_tool_names: confirmed };
     try {
@@ -214,7 +226,7 @@ export function ChatPanel({ appId, manifest, mode, shareToken, title, initialCon
                 <div className="notice warn" style={{ marginTop: 6 }}>
                   <ShieldQuestion size={16} />
                   <span className="grow">以下操作会修改外部系统，需要你确认后执行：{m.steps.filter((step) => step.status === 'confirmation_required').map(STEP_LABEL).join('、')}</span>
-                  <button className="btn sm primary" disabled={busy} onClick={() => void execute(m.request!.message, m.request!.inputs, m.steps!.filter((step) => step.status === 'confirmation_required').map((step) => step.tool))}>确认执行</button>
+                  <button className="btn sm primary" disabled={busy} onClick={() => void execute(m.request!.message, m.request!.inputs, m.steps!.filter((step) => step.status === 'confirmation_required').map((step) => step.tool), m.id)}>确认执行</button>
                 </div>
               ) : null}
               {!m.pending ? (

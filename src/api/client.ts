@@ -364,6 +364,8 @@ export interface ApiEvaluationRun {
   passed_count: number;
   failed_count: number;
   simulated: boolean;
+  /** 该次运行评测的配置是否就是当前草稿；草稿改动后需重新运行才能作为发布门禁依据。 */
+  matches_draft?: boolean;
   results: Array<{
     case_id: string;
     name: string;

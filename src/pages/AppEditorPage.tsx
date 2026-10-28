@@ -79,6 +79,18 @@ export function AppEditorPage() {
     return () => window.clearTimeout(timer);
   }, [save, manifest, persist]);
 
+  // 离开页面时补存尚未保存的修改，并在关闭标签页前提醒
+  const saveRef = useRef(save);
+  saveRef.current = save;
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => { if (saveRef.current === 'dirty' || saveRef.current === 'saving') event.preventDefault(); };
+    window.addEventListener('beforeunload', warn);
+    return () => {
+      window.removeEventListener('beforeunload', warn);
+      if (saveRef.current === 'dirty' && latest.current) void fdeApi.save(appId, latest.current).catch(() => undefined);
+    };
+  }, [appId]);
+
   const ensureSaved = useCallback(async () => {
     if (pending.current) await pending.current;
     if (save === 'dirty' || save === 'error') await persist();
@@ -117,17 +129,16 @@ export function AppEditorPage() {
       {save === 'error' ? <div style={{ padding: '8px 16px' }}><Notice tone="error" title="草稿保存失败">{saveError}</Notice></div> : null}
 
       <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: tab === 'edit' ? 'hidden' : 'auto' }}>
-        {tab === 'edit' ? (
-          <div style={{ flex: 1, display: 'flex', minHeight: 0, flexWrap: 'wrap' }}>
-            <div style={{ width: 560, maxWidth: '100%', flex: 'none', overflow: 'auto', padding: '4px 24px 24px', borderRight: '1px solid var(--border)', maxHeight: '100%' }}>
-              <AppConfigForm manifest={manifest} patch={patch} {...resources} />
-            </div>
-            <div className="grow" style={{ display: 'flex', flexDirection: 'column', minWidth: 320, background: 'var(--bg-soft)', minHeight: 0, height: '100%' }}>
-              <ChatPanel key={`${manifest.type}-${manifest.input_fields.map((field) => field.key).join(',')}`} appId={app.id} manifest={manifest} mode="debug" beforeSend={ensureSaved}
-                title={<><strong>调试预览</strong><Tag tone="orange">草稿</Tag><span className="faint">运行记录进入可观测 · 渠道「调试」</span></>} />
-            </div>
+        {/* 编排区常驻挂载：切换到其他 Tab 再回来，调试对话不会丢失 */}
+        <div style={{ flex: 1, display: tab === 'edit' ? 'flex' : 'none', minHeight: 0, flexWrap: 'wrap' }}>
+          <div style={{ width: 560, maxWidth: '100%', flex: 'none', overflow: 'auto', padding: '4px 24px 24px', borderRight: '1px solid var(--border)', maxHeight: '100%' }}>
+            <AppConfigForm manifest={manifest} patch={patch} {...resources} />
           </div>
-        ) : null}
+          <div className="grow" style={{ display: 'flex', flexDirection: 'column', minWidth: 320, background: 'var(--bg-soft)', minHeight: 0, height: '100%' }}>
+            <ChatPanel key={manifest.type} appId={app.id} manifest={manifest} mode="debug" beforeSend={ensureSaved}
+              title={<><strong>调试预览</strong><Tag tone="orange">草稿</Tag><span className="faint">运行记录进入可观测 · 渠道「调试」</span></>} />
+          </div>
+          </div>
         {tab === 'publish' ? <PublishTab app={app} onChanged={() => void reload()} /> : null}
         {tab === 'eval' ? <EvalTab app={app} /> : null}
         {tab === 'logs' ? <LogsTab app={app} /> : null}
@@ -158,15 +169,15 @@ function PublishModal({ open, app, onClose, onPublished }: { open: boolean; app:
 
   const errors = issues?.filter((item) => item.severity === 'error') ?? [];
   const warnings = issues?.filter((item) => item.severity === 'warning') ?? [];
-  const gateBlocked = gates.some((set) => !set.latest_run || set.latest_run.failed_count > 0 || set.latest_run.passed_count < set.case_count);
+  const gatePassed = (set: ApiEvaluationSet) => !!set.latest_run && !set.latest_run.failed_count && set.latest_run.passed_count >= set.case_count && set.latest_run.matches_draft !== false;
+  const gateBlocked = gates.some((set) => !gatePassed(set));
   const nextVersion = (app.versions[0]?.version ?? 0) + 1;
 
   const publish = async () => {
     setBusy(true);
     try {
-      const version = await fdeApi.version(app.id, notes.trim());
-      await fdeApi.publish(app.id, version.id);
-      toast(`已发布 v${version.version}，工作台与各渠道即时生效`);
+      const released = await fdeApi.release(app.id, notes.trim());
+      toast(`已发布 v${released.published_version?.version ?? ''}，工作台与各渠道即时生效`);
       onPublished();
     } catch (caught) {
       toast(errorMessage(caught), 'error');
@@ -184,13 +195,14 @@ function PublishModal({ open, app, onClose, onPublished }: { open: boolean; app:
         {warnings.length ? <div style={{ marginTop: 8 }}><Notice tone="warn" title="建议处理"><ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>{warnings.map((item) => <li key={item.path + item.code}>{item.message}</li>)}</ul></Notice></div> : null}
 
         <div className="section-title">2. 质量门禁</div>
-        {!gates.length ? <Notice tone="info" title="未设置发布门禁" action={<button className="btn sm" onClick={() => navigate(`/apps/${app.id}?tab=eval`)}>去设置</button>}>建议把一个评测集设为门禁，发布前自动要求全部通过。</Notice> : gates.map((set) => {
+        {!gates.length ? <Notice tone="info" title="未设置发布门禁" action={<button className="btn sm" onClick={() => { onClose(); navigate(`/apps/${app.id}?tab=eval`); }}>去设置</button>}>建议把一个评测集设为门禁，发布前自动要求全部通过。</Notice> : gates.map((set) => {
           const run = set.latest_run;
-          const passed = run && !run.failed_count && run.passed_count >= set.case_count;
+          const passed = gatePassed(set);
+          const stale = run && run.matches_draft === false;
           return (
             <div key={set.id} className="row" style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', marginBottom: 6 }}>
               {passed ? <CheckCircle2 size={16} color="#12b76a" /> : <AlertTriangle size={16} color="#f79009" />}
-              <span className="grow">{set.name}<span className="faint"> · {run ? `最近 ${run.passed_count}/${set.case_count} 通过` : '尚未运行'}</span></span>
+              <span className="grow">{set.name}<span className="faint"> · {!run ? '尚未运行' : stale ? '草稿已修改，需重新运行' : `最近 ${run.passed_count}/${set.case_count} 通过`}</span></span>
               {!passed ? <button className="btn sm" onClick={() => navigate(`/evaluation-sets?set=${set.id}`)}>去运行</button> : null}
             </div>
           );
@@ -198,7 +210,7 @@ function PublishModal({ open, app, onClose, onPublished }: { open: boolean; app:
 
         <div className="section-title">3. 版本说明</div>
         <Field label="本次改了什么" required><textarea className="textarea" style={{ minHeight: 70 }} value={notes} placeholder="例如：新增订单查询工具；竞品比价转人工" onChange={(event) => setNotes(event.target.value)} /></Field>
-        <p className="faint">发布会把当前草稿固化为不可变版本 v{nextVersion}，可随时回滚。</p>
+        <p className="faint">发布会把当前草稿固化为不可变版本 v{nextVersion}，可随时回滚；草稿与最新版本相同时直接发布该版本。</p>
       </>}
     </Modal>
   );
