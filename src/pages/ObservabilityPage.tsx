@@ -44,15 +44,18 @@ export function ObservabilityPage() {
   const view = (VIEWS.some((item) => item.key === params.get('view')) ? params.get('view') : 'overview') as ViewKey;
   const traceId = params.get('trace');
   const [days, setDays] = useState(7);
-  const [appId, setAppId] = useState(params.get('app') ?? '');
+  const appId = params.get('app') ?? '';
   const [apps, setApps] = useState<FDEApp[]>([]);
   const [caseReturn, setCaseReturn] = useState<CaseReturn | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => { fdeApi.list().then(setApps).catch(() => undefined); }, []);
-  const setView = (next: ViewKey) => setParams(next === 'overview' ? {} : { view: next });
-  const openTrace = (id: string) => setParams({ ...Object.fromEntries(params), trace: id });
-  const closeTrace = () => { const next = Object.fromEntries(params); delete next.trace; setParams(next); };
+  // 都用函数式更新，避免连续两次 setParams 时后一次用旧参数覆盖前一次
+  const update = (change: (next: URLSearchParams) => void) => setParams((current) => { const next = new URLSearchParams(current); change(next); return next; });
+  const setView = (view: ViewKey) => setParams(() => { const next = new URLSearchParams(); if (view !== 'overview') next.set('view', view); if (appId) next.set('app', appId); return next; });
+  const setAppId = (id: string) => update((next) => { if (id) next.set('app', id); else next.delete('app'); });
+  const openTrace = (id: string) => update((next) => { next.set('trace', id); next.delete('conversation'); });
+  const closeTrace = () => update((next) => next.delete('trace'));
 
   return (
     <div className="observability-layout">
@@ -73,7 +76,7 @@ export function ObservabilityPage() {
         {view === 'runs' ? <RunsView appId={appId} onTrace={openTrace} onReturn={setCaseReturn} /> : null}
         {view === 'conversations' ? <ConversationsView appId={appId} onTrace={openTrace} /> : null}
         {view === 'builds' ? <BuildsView /> : null}
-        {view === 'usage' ? <UsageView days={days} /> : null}
+        {view === 'usage' ? <UsageView days={days} appId={appId} /> : null}
       </div>
       <TraceDrawer traceId={traceId} onClose={closeTrace} onReturn={setCaseReturn} />
       <CaseReturnModal value={caseReturn} onClose={() => setCaseReturn(null)} />
@@ -86,7 +89,7 @@ export function ObservabilityPage() {
 function OverviewView({ days, appId, onTrace, setView }: { days: number; appId: string; onTrace: (id: string) => void; setView: (view: ViewKey) => void }) {
   const [data, setData] = useState<Overview | null>(null);
   const [error, setError] = useState('');
-  useEffect(() => { setData(null); obsApi.overview({ days, app_id: appId }).then(setData).catch((caught) => setError(errorMessage(caught))); }, [days, appId]);
+  useEffect(() => { setData(null); setError(''); obsApi.overview({ days, app_id: appId }).then(setData).catch((caught) => setError(errorMessage(caught))); }, [days, appId]);
   if (error) return <Notice tone="error">{error}</Notice>;
   if (!data) return <Loading />;
   const max = Math.max(1, ...data.daily.map((item) => item.runs));
@@ -155,6 +158,7 @@ function RunsView({ appId, onTrace, onReturn }: { appId: string; onTrace: (id: s
   useEffect(() => { setOffset(0); setSelected([]); }, [appId, status, channel, query]);
   useEffect(() => {
     setData(null);
+    setError('');
     obsApi.runs({ app_id: appId, status, channel, search: query, limit: PAGE, offset }).then(setData).catch((caught) => setError(errorMessage(caught)));
   }, [appId, status, channel, query, offset]);
 
@@ -310,9 +314,9 @@ function ConversationsView({ appId, onTrace }: { appId: string; onTrace: (id: st
   const [detail, setDetail] = useState<ConversationDetail | null>(null);
   const openId = params.get('conversation');
 
-  useEffect(() => { setData(null); obsApi.conversations({ app_id: appId, search: query, limit: 50 }).then(setData).catch((caught) => setError(errorMessage(caught))); }, [appId, query]);
+  useEffect(() => { setData(null); setError(''); obsApi.conversations({ app_id: appId, search: query, limit: 50 }).then(setData).catch((caught) => setError(errorMessage(caught))); }, [appId, query]);
   useEffect(() => { setDetail(null); if (openId) obsApi.conversation(openId).then(setDetail).catch((caught) => setError(errorMessage(caught))); }, [openId]);
-  const close = () => { const next = Object.fromEntries(params); delete next.conversation; setParams(next); };
+  const close = () => setParams((current) => { const next = new URLSearchParams(current); next.delete('conversation'); return next; });
 
   return (
     <div className="col" style={{ gap: 16 }}>
@@ -326,7 +330,7 @@ function ConversationsView({ appId, onTrace }: { appId: string; onTrace: (id: st
           <table className="table observability-table">
             <thead><tr><th>会话</th><th>应用</th><th>轮次</th><th>Tokens</th><th>累计费用</th><th>反馈</th><th>失败</th><th>更新时间</th></tr></thead>
             <tbody>{data.items.map((item) => (
-              <tr key={item.id} className="clickable" onClick={() => setParams({ ...Object.fromEntries(params), conversation: item.id })}>
+              <tr key={item.id} className="clickable" onClick={() => setParams((current) => { const next = new URLSearchParams(current); next.set('conversation', item.id); return next; })}>
                 <td><div className="trace-primary ellipsis">{item.title}</div><code>{item.id.slice(0, 8)}</code></td>
                 <td>{item.app_name}</td><td>{item.turns}</td><td>{formatTokens(item.tokens)}</td><td>{formatCost(item.cost)}</td>
                 <td>{item.feedback.up ? <Tag tone="green">👍 {item.feedback.up}</Tag> : null}{item.feedback.down ? <Tag tone="red">👎 {item.feedback.down}</Tag> : null}{!item.feedback.up && !item.feedback.down ? <span className="faint">—</span> : null}</td>
@@ -351,12 +355,12 @@ function ConversationsView({ appId, onTrace }: { appId: string; onTrace: (id: st
                     {message.feedback === 1 ? <Tag tone="green">👍 好评</Tag> : message.feedback === -1 ? <Tag tone="red">👎 差评</Tag> : null}
                     {message.citations.length ? <span className="faint">引用 {message.citations.length} 条</span> : null}
                     <span className="faint">{formatTokens((message.tokens.input ?? 0) + (message.tokens.output ?? 0))} tokens · {formatDuration(message.duration_ms)} · {formatCost(message.cost)}</span>
-                    {message.trace_id ? <button className="btn ghost sm" onClick={() => { close(); onTrace(message.trace_id!); }}><Activity size={13} />Trace</button> : null}
+                    {message.trace_id ? <button className="btn ghost sm" onClick={() => onTrace(message.trace_id!)}><Activity size={13} />Trace</button> : null}
                   </div>
                 </div>
               </div>
             ))}
-            {detail.failed_runs.length ? <Notice tone="error" title={`${detail.failed_runs.length} 次失败运行`}>{detail.failed_runs.map((item) => <div key={item.trace_id}><button className="btn ghost sm" onClick={() => { close(); onTrace(item.trace_id); }}>{item.query}</button>：{item.error_message}</div>)}</Notice> : null}
+            {detail.failed_runs.length ? <Notice tone="error" title={`${detail.failed_runs.length} 次失败运行`}>{detail.failed_runs.map((item) => <div key={item.trace_id}><button className="btn ghost sm" onClick={() => onTrace(item.trace_id)}>{item.query}</button>：{item.error_message}</div>)}</Notice> : null}
           </div>
         )}
       </Drawer>
@@ -378,7 +382,7 @@ function BuildsView() {
 
   const load = useCallback(() => obsApi.buildJobs({ knowledge_base_id: kbId, status, limit: 50 }).then(setData).catch((caught) => setError(errorMessage(caught))), [kbId, status]);
   useEffect(() => { apiFetch<ApiKnowledgeBase[]>('/knowledge-bases').then(setKbs).catch(() => undefined); }, []);
-  useEffect(() => { setData(null); void load(); }, [load]);
+  useEffect(() => { setData(null); setError(''); void load(); }, [load]);
   const running = data?.items.some((item) => ACTIVE_STATUSES.has(item.status));
   useEffect(() => { if (!running) return undefined; const timer = window.setInterval(() => void load(), 3000); return () => window.clearInterval(timer); }, [running, load]);
 
@@ -460,11 +464,11 @@ function BuildsView() {
 
 /* ------------------------------ 用量与费用 ------------------------------ */
 
-function UsageView({ days }: { days: number }) {
+function UsageView({ days, appId }: { days: number; appId: string }) {
   const [groupBy, setGroupBy] = useState<'app' | 'model' | 'channel'>('app');
   const [data, setData] = useState<Usage | null>(null);
   const [error, setError] = useState('');
-  useEffect(() => { setData(null); obsApi.usage({ days, group_by: groupBy }).then(setData).catch((caught) => setError(errorMessage(caught))); }, [days, groupBy]);
+  useEffect(() => { setData(null); setError(''); obsApi.usage({ days, group_by: groupBy, app_id: appId }).then(setData).catch((caught) => setError(errorMessage(caught))); }, [days, groupBy, appId]);
   if (error) return <Notice tone="error">{error}</Notice>;
   if (!data) return <Loading />;
   const totalCost = data.totals.cost ?? 0;

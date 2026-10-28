@@ -512,16 +512,17 @@ async def list_build_jobs(
 async def usage(
     days: int = Query(default=30, ge=1, le=365),
     group_by: str = Query(default="app", pattern="^(app|model|channel)$"),
+    app_id: str | None = None,
     context: AuthContext = Depends(require_roles("admin", "manager")),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
-    rows = (
-        await session.execute(
-            select(QueryLog.app_id, QueryLog.model_name, QueryLog.channel, QueryLog.status, QueryLog.input_tokens, QueryLog.output_tokens, QueryLog.total_tokens, QueryLog.cost, QueryLog.duration_ms, QueryLog.run_metadata)
-            .where(QueryLog.workspace_id == context.workspace_id, QueryLog.started_at >= _since(days))
-            .limit(100000)
-        )
-    ).all()
+    query = (
+        select(QueryLog.app_id, QueryLog.model_name, QueryLog.channel, QueryLog.status, QueryLog.input_tokens, QueryLog.output_tokens, QueryLog.total_tokens, QueryLog.cost, QueryLog.duration_ms, QueryLog.run_metadata)
+        .where(QueryLog.workspace_id == context.workspace_id, QueryLog.started_at >= _since(days))
+    )
+    if app_id:
+        query = query.where(QueryLog.app_id == app_id)
+    rows = (await session.execute(query.limit(100000))).all()
     apps = await _app_names(session, {row.app_id for row in rows})
     groups: dict[str, dict[str, Any]] = {}
     for row in rows:
