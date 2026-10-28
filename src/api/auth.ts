@@ -1,6 +1,4 @@
-import { apiFetch } from './client';
-
-const tokenKey = 'fde-access-token';
+import { apiFetch, TOKEN_KEY as tokenKey } from './client';
 
 export function getAccessToken() {
   return window.localStorage.getItem(tokenKey);
@@ -24,3 +22,12 @@ export async function logout() {
     setAccessToken(null);
   }
 }
+
+export type Me = {
+  auth_type: string;
+  role: 'admin' | 'manager' | 'user';
+  workspace_id: string;
+  user?: { id: string; email: string; display_name: string };
+};
+
+export const fetchMe = () => apiFetch<Me>('/auth/me');

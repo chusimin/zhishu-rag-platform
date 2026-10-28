@@ -1,46 +1,49 @@
 import type { Role } from '../types';
 
+export const TOKEN_KEY = 'fde-access-token';
 // Development uses Vite's same-origin proxy so modern Chromium Local Network
 // Access rules do not block a cross-port loopback request. Deployments can
 // still point at a separate API origin explicitly.
 export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
-const roleStorageKey = 'knowledge-hub-demo-role';
-
 export class ApiError extends Error {
   status: number;
+  traceId?: string;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, traceId?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
+    this.traceId = traceId;
   }
-}
-
-export function currentRole(): Role {
-  const role = window.localStorage.getItem(roleStorageKey);
-  return role === 'admin' || role === 'manager' || role === 'user' ? role : 'user';
 }
 
 export async function apiFetch<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
-  headers.set('X-Demo-Role', currentRole());
-  const accessToken = window.localStorage.getItem('fde-access-token');
+  const accessToken = window.localStorage.getItem(TOKEN_KEY);
   if (accessToken) headers.set('Authorization', `Bearer ${accessToken}`);
   if (init.body && !(init.body instanceof FormData) && !headers.has('Content-Type')) {
     headers.set('Content-Type', 'application/json');
   }
   const response = await fetch(`${API_BASE_URL}${path}`, { ...init, headers });
+  if (response.status === 401 && accessToken && !path.startsWith('/auth/login')) {
+    window.localStorage.removeItem(TOKEN_KEY);
+    window.dispatchEvent(new Event('fde-session-expired'));
+  }
   if (!response.ok) {
     let detail = `请求失败（HTTP ${response.status}）`;
+    let traceId: string | undefined;
     try {
       const body = await response.json() as { detail?: string | Array<{ msg?: string }> | { message?: string; issues?: Array<{ message?: string }> } };
       if (typeof body.detail === 'string') detail = body.detail;
       else if (Array.isArray(body.detail)) detail = body.detail.map((item) => item.msg).filter(Boolean).join('；') || detail;
-      else if (body.detail && typeof body.detail === 'object') detail = [body.detail.message, ...(body.detail.issues ?? []).map((item) => item.message)].filter(Boolean).join('；') || detail;
+      else if (body.detail && typeof body.detail === 'object') {
+        detail = [body.detail.message, ...(body.detail.issues ?? []).map((item) => item.message)].filter(Boolean).join('；') || detail;
+        traceId = (body.detail as { trace_id?: string }).trace_id;
+      }
     } catch {
       // Keep the HTTP fallback when the server did not return JSON.
     }
-    throw new ApiError(response.status, detail);
+    throw new ApiError(response.status, detail, traceId);
   }
   if (response.status === 204) return undefined as T;
   return response.json() as Promise<T>;
@@ -418,53 +421,6 @@ export interface ApiEvaluationSet {
   updated_at: string;
   latest_run: ApiEvaluationRun | null;
   cases?: ApiEvaluationCase[];
-}
-
-export type SseEvent =
-  | { event: 'meta'; data: { conversation_id: string; trace_id: string; app_id: string; knowledge_base_ids: string[] } }
-  | { event: 'citations'; data: { items: ApiCitation[] } }
-  | { event: 'token'; data: { text: string } }
-  | { event: 'done'; data: { message_id: string; input_tokens: number | null; output_tokens: number | null; total_tokens: number | null; duration_ms: number; simulated: boolean; simulation: { llm: boolean; retrieval: boolean } } }
-  | { event: 'error'; data: { detail: string; trace_id: string } };
-
-export async function streamChat(
-  appId: string,
-  payload: { message: string; conversation_id?: string; knowledge_base_ids?: string[] },
-  onEvent: (event: SseEvent) => void,
-  signal?: AbortSignal,
-): Promise<void> {
-  const accessToken = window.localStorage.getItem('fde-access-token');
-  const response = await fetch(`${API_BASE_URL}/apps/${appId}/chat`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Demo-Role': currentRole(), ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}) },
-    body: JSON.stringify(payload),
-    signal,
-  });
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({})) as { detail?: string };
-    throw new ApiError(response.status, body.detail ?? `请求失败（HTTP ${response.status}）`);
-  }
-  if (!response.body) throw new ApiError(500, '浏览器未提供流式响应体');
-
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = '';
-  const consume = (block: string) => {
-    const lines = block.replace(/\r/g, '').split('\n');
-    const event = lines.find((line) => line.startsWith('event:'))?.slice(6).trim();
-    const data = lines.filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).join('\n');
-    if (event && data) onEvent({ event, data: JSON.parse(data) } as SseEvent);
-  };
-
-  while (true) {
-    const { value, done } = await reader.read();
-    buffer += decoder.decode(value, { stream: !done });
-    const blocks = buffer.split(/\r?\n\r?\n/);
-    buffer = blocks.pop() ?? '';
-    blocks.forEach(consume);
-    if (done) break;
-  }
-  if (buffer.trim()) consume(buffer);
 }
 
 export function formatDateTime(value: string | null): string {

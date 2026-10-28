@@ -1,270 +1,319 @@
-import {
-  ArrowLeft,
-  Check,
-  FileSpreadsheet,
-  FileText,
-  Globe,
-  Link2,
-  LoaderCircle,
-  Plug,
-  Table2,
-  Type,
-  UploadCloud,
-  X,
-} from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import { ArrowLeft, Blocks, Check, CheckCircle2, FileSpreadsheet, FileText, Globe, Plug, Table2, Type, UploadCloud, X, XCircle } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
-  API_BASE_URL,
-  apiFetch,
-  errorMessage,
-  type ApiChunkConfig,
-  type ApiChunkPreview,
-  type ApiImportJob,
-  type ApiKnowledgeBase,
-  type ApiKnowledgeFile,
+  API_BASE_URL, apiFetch, errorMessage, type ApiChunkConfig, type ApiChunkPreview, type ApiImportJob, type ApiKnowledgeBase, type ApiKnowledgeFile,
 } from '../api/client';
-import { useToast } from '../components/Toast';
-import { Badge, Button, Notice, PageHeader } from '../components/ui';
+import { ChunkConfigFields, MethodPicker } from '../components/ChunkConfigFields';
+import { Field, Loading, Notice, Spinner, Tag, formatBytes, useToast } from '../components/ui';
+import { ACTIVE_STATUSES, configProblem, defaultChunkConfig, METHOD_LABEL, recommendedMethod, STAGE_LABEL, type ChunkMethod } from '../lib/knowledge';
 
 type Source = 'file' | 'web' | 'text' | 'qa' | 'feishu' | 'api';
-type ChunkMethod = ApiKnowledgeBase['chunk_method'];
 
-interface PendingFile {
+interface Pending {
   id: string;
   file: File;
   config: ApiChunkConfig;
+  recommended: ChunkMethod;
+  reason: string;
   preview?: ApiChunkPreview;
   previewError?: string;
 }
 
-const methodMeta: Array<{ value: ChunkMethod; label: string; description: string }> = [
-  { value: 'recursive', label: '结构递归', description: '按段落、句子逐级切分，适合一般文档' },
-  { value: 'heading', label: '标题层级', description: '保留章节边界，适合制度与手册' },
-  { value: 'separator', label: '自定义分隔符', description: '按指定符号切分，适合格式稳定的正文' },
-  { value: 'fixed', label: '固定长度', description: '严格按字符长度切分' },
-  { value: 'parent_child', label: '父子切块', description: '子块检索、父块返回，减少断章取义' },
-  { value: 'semantic', label: '语义切块', description: '由已配置 LLM 识别主题边界' },
-  { value: 'page', label: '按页切块', description: '保留页码，适合 PDF 和扫描资料' },
-  { value: 'table_row', label: '表格按行', description: '保留表头并按行组合，适合 CSV/Excel' },
-  { value: 'qa', label: '问答对', description: '将表格前两列直接转成问题与答案' },
+interface Upload { id: string; name: string; job?: ApiImportJob; fileStatus?: string; error?: string }
+
+const SOURCES: Array<{ key: Source; name: string; icon: typeof UploadCloud; soon?: boolean }> = [
+  { key: 'file', name: '本地文件', icon: UploadCloud },
+  { key: 'web', name: '网页链接', icon: Globe },
+  { key: 'text', name: '自定义文本', icon: Type },
+  { key: 'qa', name: '问答对表格', icon: Table2 },
+  { key: 'feishu', name: '飞书文档', icon: Blocks, soon: true },
+  { key: 'api', name: 'API 推送', icon: Plug },
 ];
 
-const sourceMeta: Array<{ value: Source; label: string; icon: typeof UploadCloud; status: 'ready' | 'blocked' | 'api' }> = [
-  { value: 'file', label: '本地文件', icon: UploadCloud, status: 'ready' },
-  { value: 'web', label: '网页链接', icon: Globe, status: 'ready' },
-  { value: 'text', label: '自定义文本', icon: Type, status: 'ready' },
-  { value: 'qa', label: '问答对', icon: Table2, status: 'ready' },
-  { value: 'feishu', label: '飞书文档', icon: Link2, status: 'blocked' },
-  { value: 'api', label: 'API 推送', icon: Plug, status: 'api' },
-];
-
-function defaultConfig(kb: ApiKnowledgeBase, method?: ChunkMethod): ApiChunkConfig {
-  return {
-    method: method ?? kb.chunk_method,
-    chunk_size: kb.chunk_size,
-    chunk_overlap: kb.chunk_overlap,
-    parent_chunk_size: kb.parent_chunk_size,
-    child_chunk_size: kb.child_chunk_size,
-    separators: ['\n\n', '\n', '。'],
-    heading_level: 3,
-    rows_per_chunk: 1,
-  };
-}
-
-function recommendedMethod(file: File): ChunkMethod {
-  const name = file.name.toLowerCase();
-  if (/\.(csv|xlsx|xlsm)$/.test(name)) return 'table_row';
-  if (/\.pdf$/.test(name)) return 'page';
-  if (/\.(md|markdown|docx)$/.test(name)) return 'heading';
-  return 'recursive';
-}
-
-function formatBytes(size: number) {
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / 1024 / 1024).toFixed(1)} MB`;
-}
+const ACCEPT = '.pdf,.docx,.md,.markdown,.png,.jpg,.jpeg,.webp,.xlsx,.xlsm,.csv';
 
 export function ImportWizardPage() {
-  const { id = '' } = useParams();
+  const { kbId = '' } = useParams();
   const navigate = useNavigate();
-  const { showToast } = useToast();
+  const toast = useToast();
   const [kb, setKb] = useState<ApiKnowledgeBase | null>(null);
   const [step, setStep] = useState(1);
   const [source, setSource] = useState<Source>('file');
-  const [items, setItems] = useState<PendingFile[]>([]);
+  const [items, setItems] = useState<Pending[]>([]);
   const [activeId, setActiveId] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [text, setText] = useState({ title: '', content: '' });
+  const [web, setWeb] = useState({ url: '', title: '' });
   const [previewing, setPreviewing] = useState(false);
+  const [uploads, setUploads] = useState<Upload[]>([]);
   const [importing, setImporting] = useState(false);
-  const [textTitle, setTextTitle] = useState('');
-  const [textContent, setTextContent] = useState('');
-  const [webUrl, setWebUrl] = useState('');
-  const [webTitle, setWebTitle] = useState('');
+  const [dragging, setDragging] = useState(false);
 
   useEffect(() => {
-    if (!id) return;
-    apiFetch<ApiKnowledgeBase>(`/knowledge-bases/${id}`)
-      .then(setKb)
-      .catch((caught) => showToast(errorMessage(caught), 'error'))
-      .finally(() => setLoading(false));
-  }, [id, showToast]);
+    apiFetch<ApiKnowledgeBase>(`/knowledge-bases/${kbId}`).then(setKb).catch((caught) => toast(errorMessage(caught), 'error'));
+  }, [kbId, toast]);
 
   const active = items.find((item) => item.id === activeId) ?? items[0];
-  const canContinue = source === 'web' ? Boolean(webUrl.trim()) : items.length > 0;
-  const configInvalid = active
-    ? active.config.chunk_overlap >= active.config.chunk_size
-      || (active.config.method === 'parent_child' && active.config.child_chunk_size >= active.config.parent_chunk_size)
-      || (active.config.method === 'semantic' && !kb?.semantic_llm_model_id)
-    : false;
 
-  const addFiles = (selected: File[], forcedMethod?: ChunkMethod) => {
-    if (!kb) return;
-    const additions = selected.map((file) => {
-      const method = forcedMethod ?? recommendedMethod(file);
-      return { id: `${file.name}-${file.size}-${file.lastModified}-${crypto.randomUUID()}`, file, config: defaultConfig(kb, method) };
+  const addFiles = (files: File[], forced?: ChunkMethod) => {
+    if (!kb || !files.length) return;
+    const added = files.map((file) => {
+      const rec = recommendedMethod(file.name);
+      const method = forced ?? rec.method;
+      return { id: crypto.randomUUID(), file, config: defaultChunkConfig(kb, method), recommended: forced ?? rec.method, reason: forced ? '问答对表格' : rec.reason };
     });
-    setItems((current) => [...current, ...additions]);
-    if (!activeId && additions[0]) setActiveId(additions[0].id);
+    setItems((current) => [...current, ...added]);
+    setActiveId((current) => current || added[0].id);
   };
 
-  const addText = () => {
-    if (!textTitle.trim() || !textContent.trim()) return;
-    const file = new File([`# ${textTitle.trim()}\n\n${textContent.trim()}\n`], `${textTitle.trim()}.md`, { type: 'text/markdown' });
-    addFiles([file], 'heading');
-    setTextTitle('');
-    setTextContent('');
-  };
-
-  const patchConfig = (patch: Partial<ApiChunkConfig>) => {
+  const patch = (patchValue: Partial<ApiChunkConfig>) => {
     if (!active) return;
-    setItems((current) => current.map((item) => item.id === active.id ? { ...item, config: { ...item.config, ...patch }, preview: undefined, previewError: undefined } : item));
+    setItems((current) => current.map((item) => (item.id === active.id ? { ...item, config: { ...item.config, ...patchValue }, previewError: undefined } : item)));
   };
 
-  const preview = async () => {
-    if (!active || !id || configInvalid) return;
+  const preview = useCallback(async (item: Pending) => {
+    if (!kb || configProblem(item.config, kb)) return;
     setPreviewing(true);
     try {
       const form = new FormData();
-      form.append('upload', active.file);
-      form.append('config', JSON.stringify(active.config));
-      const result = await apiFetch<ApiChunkPreview>(`/knowledge-bases/${id}/chunk-preview`, { method: 'POST', body: form });
-      setItems((current) => current.map((item) => item.id === active.id ? { ...item, preview: result, previewError: undefined } : item));
+      form.append('upload', item.file);
+      form.append('config', JSON.stringify(item.config));
+      const result = await apiFetch<ApiChunkPreview>(`/knowledge-bases/${kbId}/chunk-preview`, { method: 'POST', body: form });
+      setItems((current) => current.map((entry) => (entry.id === item.id ? { ...entry, preview: result, previewError: undefined } : entry)));
     } catch (caught) {
-      const message = errorMessage(caught);
-      setItems((current) => current.map((item) => item.id === active.id ? { ...item, previewError: message } : item));
+      setItems((current) => current.map((entry) => (entry.id === item.id ? { ...entry, preview: undefined, previewError: errorMessage(caught) } : entry)));
     } finally {
       setPreviewing(false);
     }
-  };
+  }, [kb, kbId]);
+
+  // 非 LLM 切块方式：参数变化后自动刷新真实预览（防抖）
+  const configKey = active ? `${active.id}:${JSON.stringify(active.config)}` : '';
+  const lastKey = useRef('');
+  useEffect(() => {
+    if (step !== 2 || !active || active.config.method === 'semantic' || configKey === lastKey.current) return undefined;
+    const timer = window.setTimeout(() => { lastKey.current = configKey; void preview(active); }, 500);
+    return () => window.clearTimeout(timer);
+  }, [step, configKey, active, preview]);
+
+  const pollUploads = useCallback(async (current: Upload[]) => {
+    const files = await apiFetch<ApiKnowledgeFile[]>(`/knowledge-bases/${kbId}/files`);
+    const jobs = await apiFetch<ApiImportJob[]>(`/knowledge-bases/${kbId}/import-jobs`);
+    return current.map((upload) => {
+      if (upload.error || !upload.job) return upload;
+      const job = jobs.find((item) => item.id === upload.job?.id) ?? upload.job;
+      return { ...upload, job, fileStatus: files.find((file) => file.id === job.file_id)?.status };
+    });
+  }, [kbId]);
+
+  const running = uploads.some((upload) => upload.job && ACTIVE_STATUSES.has(upload.job.status));
+  useEffect(() => {
+    if (!running) return undefined;
+    const timer = window.setInterval(() => { void pollUploads(uploads).then(setUploads); }, 2000);
+    return () => window.clearInterval(timer);
+  }, [running, uploads, pollUploads]);
 
   const startImport = async () => {
-    if (!id || !kb) return;
+    if (!kb) return;
     setImporting(true);
-    const failures: string[] = [];
-    let completed = 0;
-    try {
-      if (source === 'web') {
-        await apiFetch<{ file: ApiKnowledgeFile; job: ApiImportJob }>(`/knowledge-bases/${id}/web-import`, {
-          method: 'POST',
-          body: JSON.stringify({ url: webUrl.trim(), title: webTitle.trim() || null, chunk_config: defaultConfig(kb, 'heading') }),
-        });
-        completed = 1;
-      } else {
-        for (const item of items) {
-          try {
-            const form = new FormData();
-            form.append('upload', item.file);
-            form.append('config', JSON.stringify(item.config));
-            await apiFetch<{ file: ApiKnowledgeFile; job: ApiImportJob }>(`/knowledge-bases/${id}/files`, { method: 'POST', body: form });
-            completed += 1;
-          } catch (caught) {
-            failures.push(`${item.file.name}：${errorMessage(caught)}`);
-          }
-        }
+    setStep(4);
+    const results: Upload[] = [];
+    if (source === 'web') {
+      try {
+        const response = await apiFetch<{ file: ApiKnowledgeFile; job: ApiImportJob }>(`/knowledge-bases/${kbId}/web-import`, { method: 'POST', body: JSON.stringify({ url: web.url.trim(), title: web.title.trim() || null, chunk_config: defaultChunkConfig(kb, 'heading') }) });
+        results.push({ id: response.file.id, name: response.file.filename, job: response.job, fileStatus: response.file.status });
+      } catch (caught) {
+        results.push({ id: 'web', name: web.url, error: errorMessage(caught) });
       }
-      if (completed) showToast(`${completed} 个数据源已完成处理${failures.length ? `，${failures.length} 个失败` : ''}`);
-      if (failures.length) showToast(failures.join('；'), 'error');
-      if (completed) navigate(`/knowledge/${id}`);
-    } catch (caught) {
-      showToast(errorMessage(caught), 'error');
-    } finally {
-      setImporting(false);
+    } else {
+      for (const item of items) {
+        try {
+          const form = new FormData();
+          form.append('upload', item.file);
+          form.append('config', JSON.stringify(item.config));
+          const response = await apiFetch<{ file: ApiKnowledgeFile; job: ApiImportJob }>(`/knowledge-bases/${kbId}/files`, { method: 'POST', body: form });
+          results.push({ id: item.id, name: item.file.name, job: response.job, fileStatus: response.file.status });
+        } catch (caught) {
+          results.push({ id: item.id, name: item.file.name, error: errorMessage(caught) });
+        }
+        setUploads([...results]);
+      }
     }
+    setUploads(results);
+    setImporting(false);
   };
 
-  const apiExample = useMemo(() => `curl -X POST "${window.location.origin}${API_BASE_URL}/knowledge-bases/${id}/files" \\\n+  -H "Authorization: Bearer $TOKEN" \\\n+  -F "upload=@document.pdf" \\\n+  -F 'config={"method":"heading","heading_level":2,"chunk_size":800}'`, [id]);
+  if (!kb) return <Loading />;
 
-  if (loading || !kb) return <main className="page"><div className="card empty-state"><LoaderCircle className="spin" /><h2>正在加载导入配置</h2></div></main>;
+  const canNext = source === 'web' ? /^https?:\/\//.test(web.url.trim()) : items.length > 0;
+  const allProblems = items.map((item) => configProblem(item.config, kb)).filter(Boolean);
+  const done = step === 4 && !importing && !running;
+  const failed = uploads.filter((upload) => upload.error || upload.job?.status === 'failed').length;
 
   return (
-    <main className="page page-enter import-wizard-page">
-      <PageHeader
-        eyebrow={`知识库 / ${kb.name}`}
-        title="导入数据"
-        description="预览和正式导入使用同一套后端解析与切块逻辑；每个文件可独立配置。"
-        actions={<Button icon={<ArrowLeft size={16} />} onClick={() => navigate(`/knowledge/${id}`)}>返回知识库</Button>}
-      />
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div className="topbar">
+        <button className="btn ghost sm" onClick={() => navigate(`/knowledge/${kbId}`)}><ArrowLeft size={15} />{kb.name}</button>
+        <span className="title">导入数据</span>
+        <span className="grow" />
+        <div className="steps">
+          {['选择数据源', '切块与预览', '确认导入'].map((label, index) => (
+            <div key={label} className="row" style={{ gap: 8 }}>
+              {index ? <span className="step-line" /> : null}
+              <div className={`step ${step === index + 1 ? 'active' : step > index + 1 ? 'done' : ''}`}><span className="n">{step > index + 1 ? <Check size={13} /> : index + 1}</span>{label}</div>
+            </div>
+          ))}
+        </div>
+        <span className="grow" />
+        {step > 1 && step < 4 ? <button className="btn" onClick={() => setStep(source === 'web' && step === 3 ? 1 : step - 1)}>上一步</button> : null}
+        {step === 1 ? <button className="btn primary" disabled={!canNext || source === 'feishu' || source === 'api'} onClick={() => setStep(source === 'web' ? 3 : 2)}>下一步</button> : null}
+        {step === 2 ? <button className="btn primary" disabled={!!allProblems.length} onClick={() => setStep(3)}>下一步</button> : null}
+        {step === 3 ? <button className="btn primary" onClick={() => void startImport()}><UploadCloud size={15} />开始导入</button> : null}
+        {done ? <button className="btn primary" onClick={() => navigate(`/knowledge/${kbId}`)}>返回数据集</button> : null}
+      </div>
 
-      <ol className="import-steps" aria-label="导入步骤">
-        {['选择数据源', '处理与预览', '确认导入'].map((label, index) => <li key={label} className={step === index + 1 ? 'active' : step > index + 1 ? 'done' : ''}><span>{step > index + 1 ? <Check size={14} /> : index + 1}</span>{label}</li>)}
-      </ol>
+      {step === 1 ? (
+        <div className="page" style={{ maxWidth: 980, margin: '0 auto', width: '100%' }}>
+          <div className="grid" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', gap: 10 }}>
+            {SOURCES.map(({ key, name, icon: Icon, soon }) => (
+              <button key={key} className={`method-card ${source === key ? 'active' : ''} ${soon ? 'coming-soon' : ''}`} disabled={soon} style={{ flexDirection: 'column', alignItems: 'center', padding: 14 }} onClick={() => setSource(key)}>
+                <Icon size={22} color="var(--primary)" /><h4>{name}</h4>{soon ? <Tag>即将上线</Tag> : null}
+              </button>
+            ))}
+          </div>
+          <div style={{ marginTop: 20 }}>
+            {source === 'file' || source === 'qa' ? <>
+              {source === 'qa' ? <div style={{ marginBottom: 12 }}><Notice tone="info" title="问答对格式">CSV 或 Excel：第一列问题、第二列答案，可选第三列为用「|」分隔的相似问法。每行直接成为一个问答分块。</Notice></div> : null}
+              <label className="upload-zone" style={dragging ? { borderColor: 'var(--primary)', background: 'var(--primary-50)' } : undefined}
+                onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)}
+                onDrop={(event) => { event.preventDefault(); setDragging(false); addFiles(Array.from(event.dataTransfer.files), source === 'qa' ? 'qa' : undefined); }}>
+                <UploadCloud size={30} color="var(--primary)" />
+                <strong style={{ color: 'var(--text-1)' }}>{dragging ? '松开以添加文件' : '点击或拖拽文件到此处'}</strong>
+                <span>{source === 'qa' ? '支持 CSV、XLSX、XLSM' : '支持 PDF、DOCX、Markdown、图片、XLSX、CSV；按文件类型推荐切块方式'}</span>
+                <input type="file" multiple hidden accept={source === 'qa' ? '.csv,.xlsx,.xlsm' : ACCEPT} onChange={(event) => { addFiles(Array.from(event.target.files ?? []), source === 'qa' ? 'qa' : undefined); event.target.value = ''; }} />
+              </label>
+            </> : null}
+            {source === 'text' ? (
+              <div className="card pad">
+                <Field label="标题" required><input className="input" value={text.title} onChange={(event) => setText({ ...text, title: event.target.value })} placeholder="例如：新品上市统一口径" /></Field>
+                <Field label="内容" required hint="支持 Markdown"><textarea className="textarea" style={{ minHeight: 220 }} value={text.content} onChange={(event) => setText({ ...text, content: event.target.value })} /></Field>
+                <button className="btn" disabled={!text.title.trim() || !text.content.trim()} onClick={() => { addFiles([new File([`# ${text.title.trim()}\n\n${text.content.trim()}\n`], `${text.title.trim()}.md`, { type: 'text/markdown' })]); setText({ title: '', content: '' }); }}><FileText size={15} />加入待导入列表</button>
+              </div>
+            ) : null}
+            {source === 'web' ? (
+              <div className="card pad">
+                <Notice tone="info" title="安全抓取">只允许公网 HTTP/HTTPS 地址，拒绝内网、环回和保留地址。</Notice>
+                <div style={{ height: 12 }} />
+                <Field label="网页地址" required><input className="input" value={web.url} onChange={(event) => setWeb({ ...web, url: event.target.value })} placeholder="https://help.example.com/docs/article" /></Field>
+                <Field label="文档标题" hint="可选，默认读取网页标题"><input className="input" value={web.title} onChange={(event) => setWeb({ ...web, title: event.target.value })} /></Field>
+              </div>
+            ) : null}
+            {source === 'api' ? (
+              <div className="card pad">
+                <p className="muted" style={{ marginBottom: 12 }}>业务系统可用具备 <code>knowledge:write</code> 权限的 Token 推送文件，切块参数与界面一致。</p>
+                <div className="code-block">{`curl -X POST "${window.location.origin}${API_BASE_URL}/knowledge-bases/${kbId}/files" \\
+  -H "Authorization: Bearer $TOKEN" \\
+  -F "upload=@document.pdf" \\
+  -F 'config={"method":"heading","heading_level":2,"chunk_size":800,"chunk_overlap":80}'`}</div>
+              </div>
+            ) : null}
+            {items.length && source !== 'web' && source !== 'api' ? (
+              <div className="col" style={{ marginTop: 16, gap: 8 }}>
+                {items.map((item) => (
+                  <div key={item.id} className="card row" style={{ padding: '10px 14px' }}>
+                    {/\.(csv|xlsx|xlsm)$/i.test(item.file.name) ? <FileSpreadsheet size={18} color="#12b76a" /> : <FileText size={18} color="#3370ff" />}
+                    <div className="grow"><div style={{ fontWeight: 500 }}>{item.file.name}</div><div className="faint">{formatBytes(item.file.size)} · 推荐「{METHOD_LABEL[item.recommended]}」（{item.reason}）</div></div>
+                    <button className="btn ghost sm icon" aria-label={`移除 ${item.file.name}`} onClick={() => setItems((current) => current.filter((entry) => entry.id !== item.id))}><X size={14} /></button>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
-      {step === 1 ? <section className="card import-source-card">
-        <div className="source-grid">{sourceMeta.map(({ value, label, icon: Icon, status }) => <button key={value} className={`source-option ${source === value ? 'active' : ''}`} onClick={() => setSource(value)}><Icon size={22} /><strong>{label}</strong><Badge tone={status === 'ready' ? 'success' : status === 'api' ? 'info' : 'warning'}>{status === 'ready' ? '可用' : status === 'api' ? '接口' : '未连接'}</Badge></button>)}</div>
+      {step === 2 && active ? (
+        <div style={{ flex: 1, display: 'flex', minHeight: 0, flexWrap: 'wrap' }}>
+          <div style={{ width: 460, maxWidth: '100%', flex: 'none', borderRight: '1px solid var(--border)', overflow: 'auto', padding: 20, maxHeight: '100%' }}>
+            <div className="field-label">文件<span className="hint">每个文件单独设置</span></div>
+            <div className="col" style={{ gap: 6, marginBottom: 18 }}>
+              {items.map((item) => (
+                <button key={item.id} className={`sub-link ${item.id === active.id ? 'active' : ''}`} style={{ border: '1px solid var(--border)' }} onClick={() => setActiveId(item.id)}>
+                  <FileText size={15} /><span className="grow ellipsis">{item.file.name}</span>
+                  {configProblem(item.config, kb) ? <Tag tone="red">需调整</Tag> : <Tag tone={item.id === active.id ? 'blue' : ''}>{METHOD_LABEL[item.config.method]}</Tag>}
+                </button>
+              ))}
+            </div>
+            <div className="field-label">切块方式<span className="hint">推荐：{METHOD_LABEL[active.recommended]}</span></div>
+            <MethodPicker kb={kb} value={active.config.method} recommended={active.recommended} onChange={(method) => patch({ method })}
+              disabled={/\.(csv|xlsx|xlsm)$/i.test(active.file.name) ? [] : ['table_row', 'qa']} />
+            <div className="card pad" style={{ background: 'var(--bg-soft)', marginTop: 16 }}>
+              <strong style={{ display: 'block', marginBottom: 10 }}>{METHOD_LABEL[active.config.method]} · 参数</strong>
+              <ChunkConfigFields config={active.config} patch={patch} />
+              {items.length > 1 ? <button className="btn sm ghost" style={{ color: 'var(--primary)' }} onClick={() => { setItems((current) => current.map((item) => ({ ...item, config: { ...active.config } }))); toast('已应用到全部文件'); }}>应用到全部文件</button> : null}
+            </div>
+          </div>
+          <div style={{ flex: 1, minWidth: 320, display: 'flex', flexDirection: 'column', background: 'var(--bg-soft)', minHeight: 0 }}>
+            <div className="row" style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', background: 'var(--surface)' }}>
+              <strong>真实切块预览</strong><Tag tone="blue">{METHOD_LABEL[active.config.method]}</Tag>
+              <span className="grow" />
+              {active.preview ? <span className="faint">共 <strong style={{ color: 'var(--text-1)' }}>{active.preview.total_chunks}</strong> 块{active.preview.total_chunks > active.preview.returned_chunks ? `（展示前 ${active.preview.returned_chunks} 块）` : ''} · 平均 {Math.round(active.preview.chunks.reduce((sum, chunk) => sum + chunk.char_count, 0) / Math.max(1, active.preview.chunks.length))} 字</span> : null}
+              {previewing ? <Spinner /> : null}
+              {active.config.method === 'semantic' ? <button className="btn sm primary" disabled={previewing} onClick={() => void preview(active)}>调用模型预览</button> : null}
+            </div>
+            <div style={{ flex: 1, overflow: 'auto', padding: 20, opacity: previewing ? 0.55 : 1, transition: 'opacity .2s' }}>
+              {configProblem(active.config, kb) ? <Notice tone="error">{configProblem(active.config, kb)}</Notice> : null}
+              {active.previewError ? <Notice tone="error" title="预览失败">{active.previewError}</Notice> : null}
+              {active.preview?.warnings.map((warning) => <div key={warning} style={{ marginBottom: 8 }}><Notice tone="warn">{warning}</Notice></div>)}
+              {!active.preview && !active.previewError && !previewing ? <p className="faint">{active.config.method === 'semantic' ? '语义分块会调用模型，点击右上角按钮生成预览。' : '正在生成预览…'}</p> : null}
+              <div className="col" style={{ gap: 10 }}>
+                {active.preview?.chunks.map((chunk) => (
+                  <div key={chunk.ordinal} className="chunk-card">
+                    <header><span className="idx">#{chunk.ordinal}</span><span className="ellipsis grow">{chunk.title}</span>{chunk.metadata.page_number ? <span>第 {String(chunk.metadata.page_number)} 页</span> : null}<span>{chunk.char_count} 字</span></header>
+                    <div className="body">{chunk.content}</div>
+                    {chunk.metadata.parent_content ? <div className="child body" style={{ fontSize: 12 }}>父块：{String(chunk.metadata.parent_content).slice(0, 160)}{String(chunk.metadata.parent_content).length > 160 ? '…' : ''}</div> : null}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
-        {source === 'file' ? <SourceFiles items={items} addFiles={addFiles} remove={(itemId) => setItems((current) => current.filter((item) => item.id !== itemId))} /> : null}
-        {source === 'qa' ? <div className="import-source-body"><Notice tone="info" title="问答对格式">上传 CSV 或 Excel；第一列为问题、第二列为答案、第三列可填写用“|”分隔的相似问法。每行会直接成为一个问答分块。</Notice><label className="upload-zone"><Table2 size={28} /><strong>选择问答表格</strong><span>支持 CSV、XLSX、XLSM</span><input type="file" multiple accept=".csv,.xlsx,.xlsm" onChange={(event) => addFiles(Array.from(event.target.files ?? []), 'qa')} /></label><SourceFileList items={items} remove={(itemId) => setItems((current) => current.filter((item) => item.id !== itemId))} /></div> : null}
-        {source === 'text' ? <div className="import-source-body form-stack"><label className="form-label">标题<input className="field" value={textTitle} onChange={(event) => setTextTitle(event.target.value)} placeholder="例如：新品上市统一口径" /></label><label className="form-label">正文<textarea className="field import-textarea" value={textContent} onChange={(event) => setTextContent(event.target.value)} placeholder="支持 Markdown" /></label><Button icon={<FileText size={16} />} disabled={!textTitle.trim() || !textContent.trim()} onClick={addText}>加入待导入列表</Button><SourceFileList items={items} remove={(itemId) => setItems((current) => current.filter((item) => item.id !== itemId))} /></div> : null}
-        {source === 'web' ? <div className="import-source-body form-stack"><Notice tone="info" title="安全抓取">后端只允许公网 HTTP/HTTPS 地址，不跟随重定向，并阻止环回、内网和保留地址。</Notice><label className="form-label">网页地址<input className="field" value={webUrl} onChange={(event) => setWebUrl(event.target.value)} placeholder="https://docs.example.com/article" /></label><label className="form-label">文档标题（可选）<input className="field" value={webTitle} onChange={(event) => setWebTitle(event.target.value)} placeholder="默认读取网页标题" /></label></div> : null}
-        {source === 'feishu' ? <div className="import-source-body"><Notice tone="warning" title="尚未连接企业飞书">需要企业管理员提供飞书应用凭据和知识空间授权后才能同步。当前不会用示例数据伪装成功；其余导入方式可正常使用。</Notice></div> : null}
-        {source === 'api' ? <div className="import-source-body"><Notice tone="info" title="API 推送已可用">使用具有 knowledge:write scope 的 Token 调用现有上传接口。响应会返回文件和构建任务状态。</Notice><pre className="code-block">{apiExample}</pre></div> : null}
-      </section> : null}
-
-      {step === 2 ? <section className="import-process-layout">
-        {source === 'web' ? <div className="card import-web-confirm"><Globe size={32} /><h2>网页将在确认后抓取</h2><p>{webUrl}</p><Notice tone="info" title="抓取结果可追溯">导入文件会保留来源 URL，并进入与本地文件相同的解析、切块和向量化流程。</Notice></div> : <>
-          <aside className="card import-file-rail"><h2>文件配置</h2>{items.map((item) => <button key={item.id} className={item.id === active?.id ? 'active' : ''} onClick={() => setActiveId(item.id)}><FileText size={16} /><span>{item.file.name}</span><small>{methodMeta.find((method) => method.value === item.config.method)?.label}</small></button>)}</aside>
-          {active ? <div className="card import-config-panel">
-            <header><div><h2>{active.file.name}</h2><p>{formatBytes(active.file.size)} · 配置会随文件保存</p></div><Button variant="primary" disabled={previewing || configInvalid} onClick={() => void preview()}>{previewing ? <LoaderCircle size={16} className="spin" /> : null}{previewing ? '预览中' : '生成真实预览'}</Button></header>
-            <div className="method-grid">{methodMeta.map((method) => <button key={method.value} className={active.config.method === method.value ? 'active' : ''} disabled={method.value === 'semantic' && !kb.semantic_llm_model_id} onClick={() => patchConfig({ method: method.value })}><strong>{method.label}</strong><small>{method.description}</small></button>)}</div>
-            <ChunkFields config={active.config} patch={patchConfig} />
-            {configInvalid ? <Notice tone="error" title="配置无效">重叠长度必须小于块大小；父子切块中子块必须小于父块；语义切块需要先配置 LLM。</Notice> : null}
-            {active.previewError ? <Notice tone="error" title="预览失败">{active.previewError}</Notice> : null}
-            {active.preview ? <PreviewPanel preview={active.preview} /> : <div className="empty-state compact"><FileText size={24} /><h3>等待生成预览</h3><p>预览不会保存文件，也不会生成向量。</p></div>}
-          </div> : null}
-        </>}
-      </section> : null}
-
-      {step === 3 ? <section className="card import-confirm-card"><h2>确认导入</h2><p>开始后会真实写入对象存储，执行解析、元数据抽取、切块和向量化。</p>{source === 'web' ? <div className="confirm-row"><Globe size={18} /><span><strong>{webTitle || webUrl}</strong><small>{webUrl}</small></span><Badge tone="info">网页</Badge></div> : items.map((item) => <div className="confirm-row" key={item.id}><FileText size={18} /><span><strong>{item.file.name}</strong><small>{formatBytes(item.file.size)} · {methodMeta.find((method) => method.value === item.config.method)?.label} · {item.preview ? `${item.preview.total_chunks} 块预览` : '未预览'}</small></span><Badge tone={item.preview ? 'success' : 'warning'}>{item.preview ? '已预览' : '待处理'}</Badge></div>)}</section> : null}
-
-      <footer className="import-footer">
-        <span>{step === 1 ? '选择可用数据源；飞书需企业凭据后启用。' : step === 2 ? '建议逐文件预览后再导入。' : `将导入 ${source === 'web' ? 1 : items.length} 个数据源。`}</span>
-        <div>{step > 1 ? <Button onClick={() => setStep(step - 1)}>上一步</Button> : null}{step === 1 ? <Button variant="primary" disabled={!canContinue || source === 'feishu' || source === 'api'} onClick={() => setStep(2)}>下一步</Button> : null}{step === 2 ? <Button variant="primary" disabled={items.some((item) => item.config.chunk_overlap >= item.config.chunk_size)} onClick={() => setStep(3)}>下一步</Button> : null}{step === 3 ? <Button variant="primary" disabled={importing} onClick={() => void startImport()}>{importing ? <LoaderCircle size={16} className="spin" /> : <UploadCloud size={16} />}{importing ? '正在导入' : '开始导入'}</Button> : null}</div>
-      </footer>
-    </main>
+      {step >= 3 ? (
+        <div className="page" style={{ maxWidth: 980, margin: '0 auto', width: '100%' }}>
+          {step === 3 ? <p className="muted" style={{ marginBottom: 12 }}>开始后会写入对象存储，执行解析、元数据抽取、切块和向量化。新分块完成后即可被引用本库的应用检索，无需重新发布应用。</p> : null}
+          <div className="card">
+            <table className="table">
+              <thead><tr><th>数据源</th><th>切块方式</th><th>预览分块</th><th style={{ width: 240 }}>{step === 4 ? '进度' : '状态'}</th></tr></thead>
+              <tbody>
+                {source === 'web' ? (
+                  <tr><td><div className="row"><Globe size={16} color="#12b76a" />{web.title || web.url}</div></td><td><Tag tone="blue">{METHOD_LABEL.heading}</Tag></td><td>—</td><td><UploadState upload={uploads[0]} pending={step === 3} /></td></tr>
+                ) : items.map((item, index) => (
+                  <tr key={item.id}>
+                    <td><div className="row"><FileText size={16} color="#3370ff" />{item.file.name}</div></td>
+                    <td><Tag tone="blue">{METHOD_LABEL[item.config.method]}</Tag></td>
+                    <td>{item.preview ? item.preview.total_chunks : <span className="faint">未预览</span>}</td>
+                    <td><UploadState upload={uploads.find((upload) => upload.id === item.id) ?? (step === 4 && importing && index >= uploads.length ? { id: item.id, name: item.file.name } : undefined)} pending={step === 3} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {done ? <div style={{ marginTop: 16 }}><Notice tone={failed ? 'warn' : 'success'} title={failed ? `${uploads.length - failed} 个成功，${failed} 个失败` : '导入完成'}>{failed ? '失败的文件可在数据集中查看原因并重试。' : '新分块已可被检索，可以去「检索测试」验证效果。'}</Notice></div> : null}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
-function SourceFiles({ items, addFiles, remove }: { items: PendingFile[]; addFiles: (files: File[]) => void; remove: (id: string) => void }) {
-  return <div className="import-source-body"><label className="upload-zone"><UploadCloud size={30} /><strong>点击或拖拽文件到此处</strong><span>支持 PDF、DOCX、Markdown、图片、XLSX/XLSM、CSV</span><input type="file" multiple accept=".pdf,.docx,.md,.markdown,.png,.jpg,.jpeg,.webp,.xlsx,.xlsm,.csv" onChange={(event) => addFiles(Array.from(event.target.files ?? []))} /></label><SourceFileList items={items} remove={remove} /></div>;
-}
-
-function SourceFileList({ items, remove }: { items: PendingFile[]; remove: (id: string) => void }) {
-  return <div className="pending-files">{items.map((item) => { const TableIcon = /\.(csv|xlsx|xlsm)$/i.test(item.file.name) ? FileSpreadsheet : FileText; return <div key={item.id}><TableIcon size={18} /><span><strong>{item.file.name}</strong><small>{formatBytes(item.file.size)} · 推荐 {methodMeta.find((method) => method.value === item.config.method)?.label}</small></span><Button variant="ghost" aria-label={`移除 ${item.file.name}`} onClick={() => remove(item.id)}><X size={15} /></Button></div>; })}</div>;
-}
-
-function ChunkFields({ config, patch }: { config: ApiChunkConfig; patch: (value: Partial<ApiChunkConfig>) => void }) {
-  return <div className="chunk-field-grid">
-    {['recursive', 'heading', 'separator', 'fixed'].includes(config.method) ? <><label className="form-label">块大小<input className="field" type="number" min={50} max={12000} value={config.chunk_size} onChange={(event) => patch({ chunk_size: Number(event.target.value) })} /></label><label className="form-label">重叠字符<input className="field" type="number" min={0} max={1000} value={config.chunk_overlap} onChange={(event) => patch({ chunk_overlap: Number(event.target.value) })} /></label></> : null}
-    {config.method === 'heading' ? <label className="form-label">标题层级<select className="field" value={config.heading_level} onChange={(event) => patch({ heading_level: Number(event.target.value) })}><option value={1}>H1</option><option value={2}>H1–H2</option><option value={3}>H1–H3</option><option value={4}>H1–H4</option></select></label> : null}
-    {config.method === 'separator' ? <label className="form-label span-2">分隔符（每行一个）<textarea className="field" value={config.separators.join('\n')} onChange={(event) => patch({ separators: event.target.value.split('\n').filter(Boolean) })} /></label> : null}
-    {config.method === 'parent_child' ? <><label className="form-label">父块大小<input className="field" type="number" value={config.parent_chunk_size} onChange={(event) => patch({ parent_chunk_size: Number(event.target.value) })} /></label><label className="form-label">子块大小<input className="field" type="number" value={config.child_chunk_size} onChange={(event) => patch({ child_chunk_size: Number(event.target.value) })} /></label></> : null}
-    {config.method === 'table_row' ? <label className="form-label">每块行数<input className="field" type="number" min={1} max={20} value={config.rows_per_chunk} onChange={(event) => patch({ rows_per_chunk: Number(event.target.value) })} /></label> : null}
-  </div>;
-}
-
-function PreviewPanel({ preview }: { preview: ApiChunkPreview }) {
-  const average = preview.chunks.length ? Math.round(preview.chunks.reduce((sum, chunk) => sum + chunk.char_count, 0) / preview.chunks.length) : 0;
-  return <div className="chunk-preview"><header><strong>真实切块预览</strong><span>{preview.total_chunks} 块 · 平均 {average} 字{preview.page_count ? ` · ${preview.page_count} 页` : ''}</span></header>{preview.warnings.map((warning) => <Notice key={warning} tone="warning" title="解析提示">{warning}</Notice>)}<div className="chunk-preview-list">{preview.chunks.map((chunk) => <article key={chunk.ordinal}><div><Badge tone="info">#{chunk.ordinal}</Badge><strong>{chunk.title}</strong><small>{chunk.char_count} 字</small></div><p>{chunk.content}</p></article>)}</div></div>;
+function UploadState({ upload, pending }: { upload?: Upload; pending: boolean }) {
+  if (pending) return <span className="faint">待导入</span>;
+  if (!upload) return <span className="faint">排队中</span>;
+  if (upload.error) return <div><Tag tone="red"><XCircle size={12} />上传失败</Tag><div className="faint">{upload.error}</div></div>;
+  const job = upload.job;
+  if (!job) return <span className="row faint"><Spinner size={12} />上传中</span>;
+  if (job.status === 'completed') return <Tag tone="green"><CheckCircle2 size={12} />完成</Tag>;
+  if (job.status === 'failed') return <div><Tag tone="red"><XCircle size={12} />失败</Tag><div className="faint">{job.error_message}</div></div>;
+  return <div><div className="row faint" style={{ marginBottom: 4 }}><Spinner size={12} />{STAGE_LABEL[job.current_stage] ?? job.current_stage} · {job.progress}%</div><div className="progress"><i style={{ width: `${job.progress}%` }} /></div></div>;
 }

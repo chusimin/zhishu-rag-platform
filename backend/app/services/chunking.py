@@ -120,7 +120,18 @@ def _heading_chunks(parsed: ParsedDocument, chunk_size: int, heading_level: int)
     chunks: list[Document] = []
     pattern = re.compile(rf"(?m)^(?=#{{1,{max(1, min(heading_level, 6))}}}\s+)")
     for unit_index, unit in enumerate(parsed.units):
-        sections = [item.strip() for item in pattern.split(unit.content) if item.strip()]
+        raw_sections = [item.strip() for item in pattern.split(unit.content) if item.strip()]
+        # 只有标题、没有正文的段落（如文档总标题）并入下一段，避免产生无检索价值的空标题块。
+        sections: list[str] = []
+        carry = ""
+        for item in raw_sections:
+            if all(line.lstrip().startswith("#") for line in item.splitlines() if line.strip()):
+                carry = f"{carry}\n\n{item}".strip()
+                continue
+            sections.append(f"{carry}\n\n{item}".strip() if carry else item)
+            carry = ""
+        if carry:
+            sections.append(carry)
         if len(sections) <= 1:
             sections = [unit.content]
         for section_index, section in enumerate(sections):
@@ -313,9 +324,21 @@ async def split_document(
         custom = [item for item in (separators or []) if item]
         if not custom:
             return _recursive_chunks(parsed, chunk_size, chunk_overlap)
+        # 严格在分隔符处切开：字面分隔符保留在片段末尾；"re:" 前缀为正则（如 re:(?=第[一二三四五六七八九十百]+条)）。
+        boundary = re.compile("|".join(item[3:] if item.startswith("re:") else f"(?<={re.escape(item)})" for item in custom))
+        oversize = _splitter(chunk_size, chunk_overlap)
+
+        def pieces(text: str) -> list[str]:
+            result: list[str] = []
+            for part in boundary.split(text):
+                part = part.strip()
+                if part:
+                    result.extend(oversize.split_text(part) if len(part) > chunk_size else [part])
+            return result
+
         chunks: list[Document] = []
         for unit_index, unit in enumerate(parsed.units):
-            for content in _splitter(chunk_size, chunk_overlap, custom + [""]).split_text(unit.content):
+            for content in pieces(unit.content):
                 normalized = content.strip()
                 if normalized:
                     chunks.append(

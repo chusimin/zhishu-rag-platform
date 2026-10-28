@@ -76,3 +76,25 @@ async def test_semantic_chunking_rejects_omitted_source_text() -> None:
             chunk_overlap=100,
             semantic_gateway=gateway,
         )
+
+
+async def test_separator_supports_regex_clause_boundaries() -> None:
+    from app.services.chunking import split_document
+    from app.services.parsers import ParsedDocument, ParsedUnit
+
+    text = "第一条 总则内容。第二条 退货规则。第三条 保修规则。"
+    parsed = ParsedDocument(units=[ParsedUnit(content=text, title="政策")], page_count=None, used_ocr=False)
+    chunks = await split_document(parsed, chunk_method="separator", chunk_size=12, chunk_overlap=0, separators=["re:(?=第[一二三四五六七八九十]+条)"])
+    assert [chunk.page_content for chunk in chunks] == ["第一条 总则内容。", "第二条 退货规则。", "第三条 保修规则。"]
+
+
+async def test_heading_only_sections_merge_into_next_section() -> None:
+    from app.services.chunking import split_document
+    from app.services.parsers import ParsedDocument, ParsedUnit
+
+    text = "# 差旅办法\n\n## 第一章 总则\n\n第一条 内容。\n\n## 第二章 住宿\n\n第三条 标准。"
+    parsed = ParsedDocument(units=[ParsedUnit(content=text, title="差旅办法")])
+    chunks = await split_document(parsed, chunk_method="heading", chunk_size=800, chunk_overlap=0, heading_level=3)
+    assert len(chunks) == 2
+    assert chunks[0].page_content.startswith("# 差旅办法")
+    assert "第一条" in chunks[0].page_content

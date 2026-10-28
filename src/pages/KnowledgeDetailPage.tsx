@@ -1,281 +1,482 @@
-import { AlertTriangle, Check, CheckCircle2, FileImage, FileSpreadsheet, FileText, LoaderCircle, Plus, RefreshCw, Settings2, Tags, UploadCloud } from 'lucide-react';
+import { AlertCircle, ArrowLeft, ChevronRight, FileSpreadsheet, FileText, FlaskConical, Globe, RefreshCw, Search, Settings2, Tags, Trash2, Upload } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
-import { apiFetch, errorMessage, formatDateTime, type ApiImportJob, type ApiKnowledgeBase, type ApiKnowledgeFile, type ApiModelOption } from '../api/client';
-import { KnowledgeNav } from '../components/KnowledgeNav';
-import { useToast } from '../components/Toast';
-import { Badge, Button, Drawer, Modal, Notice, PageHeader } from '../components/ui';
+import { Link, NavLink, Route, Routes, useNavigate, useParams } from 'react-router-dom';
+import {
+  apiFetch, errorMessage, type ApiChunk, type ApiChunkConfig, type ApiImportJob, type ApiKnowledgeBase, type ApiKnowledgeFile,
+  type ApiModelOption, type ApiRetrievalResponse,
+} from '../api/client';
+import { fdeApi, type FDEApp } from '../api/fde';
+import { ChunkConfigFields, MethodPicker } from '../components/ChunkConfigFields';
+import {
+  ConfirmModal, Drawer, Empty, Field, Loading, Modal, Notice, Slider, Spinner, Tag, formatBytes, formatTime, useToast,
+} from '../components/ui';
+import { ACTIVE_STATUSES, configProblem, defaultChunkConfig, FILE_STATUS, METHOD_LABEL, modelsOf, recommendedMethod, STAGE_LABEL } from '../lib/knowledge';
 
-const statusLabels: Record<string, string> = { queued: '排队中', uploading: '校验中', parsing: '解析中', chunking: '分块中', indexing: '索引中', completed: '已索引', failed: '处理失败' };
-const stageLabels: Record<string, string> = { file_validation: '文件校验', content_parsing: '内容解析', metadata_extraction: '元数据抽取', metadata_preserved: '人工元数据', chunking: '结构分块', embedding: '向量索引', completed: '构建完成', failed: '构建失败' };
-const activeStatuses = new Set(['queued', 'uploading', 'parsing', 'chunking', 'indexing']);
-
-function iconFor(extension: string) {
-  if (['.png', '.jpg', '.jpeg', '.webp'].includes(extension)) return FileImage;
-  if (['.xlsx', '.xlsm', '.csv'].includes(extension)) return FileSpreadsheet;
-  return FileText;
-}
-
-function formatBytes(size: number) {
-  if (size < 1024) return `${size} B`;
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
-  return `${(size / 1024 / 1024).toFixed(1)} MB`;
-}
-
-function splitMetadataList(value: string) {
-  return value.split(/[\n,，、]+/).map((item) => item.trim()).filter(Boolean);
+function FileIcon({ file }: { file: Pick<ApiKnowledgeFile, 'extension' | 'filename'> }) {
+  if (['csv', 'xlsx', 'xlsm'].includes(file.extension)) return <FileSpreadsheet size={17} color="#12b76a" />;
+  if (file.filename.startsWith('http')) return <Globe size={17} color="#12b76a" />;
+  return <FileText size={17} color="#3370ff" />;
 }
 
 export function KnowledgeDetailPage() {
-  const { id = '' } = useParams();
-  const navigate = useNavigate();
+  const { kbId = '' } = useParams();
   const [kb, setKb] = useState<ApiKnowledgeBase | null>(null);
-  const [files, setFiles] = useState<ApiKnowledgeFile[]>([]);
-  const [jobs, setJobs] = useState<ApiImportJob[]>([]);
-  const [models, setModels] = useState<ApiModelOption[]>([]);
-  const [ocrId, setOcrId] = useState('');
-  const [settingsOpen, setSettingsOpen] = useState(false);
-  const [chunkMethod, setChunkMethod] = useState<ApiKnowledgeBase['chunk_method']>('recursive');
-  const [chunkSize, setChunkSize] = useState(800);
-  const [chunkOverlap, setChunkOverlap] = useState(120);
-  const [parentChunkSize, setParentChunkSize] = useState(1600);
-  const [childChunkSize, setChildChunkSize] = useState(400);
-  const [semanticLlmId, setSemanticLlmId] = useState('');
-  const [metadataLlmId, setMetadataLlmId] = useState('');
-  const [savingSettings, setSavingSettings] = useState(false);
-  const [importOpen, setImportOpen] = useState(false);
-  const [taskOpen, setTaskOpen] = useState(false);
-  const [metadataFile, setMetadataFile] = useState<ApiKnowledgeFile | null>(null);
-  const [metadataTime, setMetadataTime] = useState('');
-  const [metadataVersion, setMetadataVersion] = useState('');
-  const [metadataSubjects, setMetadataSubjects] = useState('');
-  const [metadataOwner, setMetadataOwner] = useState('');
-  const [metadataKeywords, setMetadataKeywords] = useState('');
-  const [metadataQuestions, setMetadataQuestions] = useState('');
-  const [savingMetadata, setSavingMetadata] = useState(false);
-  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const [dragActive, setDragActive] = useState(false);
+  const [apps, setApps] = useState<FDEApp[]>([]);
   const [error, setError] = useState('');
-  const { showToast } = useToast();
 
-  const load = useCallback(async () => {
-    if (!id) return;
+  const reload = useCallback(async () => {
     try {
-      const [knowledge, importedFiles, importJobs, configuredModels] = await Promise.all([
-        apiFetch<ApiKnowledgeBase>(`/knowledge-bases/${id}`),
-        apiFetch<ApiKnowledgeFile[]>(`/knowledge-bases/${id}/files`),
-        apiFetch<ApiImportJob[]>(`/knowledge-bases/${id}/import-jobs`),
-        apiFetch<ApiModelOption[]>('/model-options'),
-      ]);
-      setKb(knowledge);
-      setFiles(importedFiles);
-      setJobs(importJobs);
-      setModels(configuredModels);
-      setOcrId(knowledge.ocr_model_id ?? '');
-      setChunkMethod(knowledge.chunk_method);
-      setChunkSize(knowledge.chunk_size);
-      setChunkOverlap(knowledge.chunk_overlap);
-      setParentChunkSize(knowledge.parent_chunk_size);
-      setChildChunkSize(knowledge.child_chunk_size);
-      setSemanticLlmId(knowledge.semantic_llm_model_id ?? '');
-      setMetadataLlmId(knowledge.metadata_llm_model_id ?? '');
-      setError('');
+      setKb(await apiFetch<ApiKnowledgeBase>(`/knowledge-bases/${kbId}`));
     } catch (caught) {
       setError(errorMessage(caught));
     }
-  }, [id]);
+  }, [kbId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void reload(); fdeApi.list().then(setApps).catch(() => undefined); }, [reload]);
 
-  const activeJobs = jobs.filter((job) => activeStatuses.has(job.status));
+  if (error) return <div className="page"><Notice tone="error" title="无法加载知识库">{error}</Notice></div>;
+  if (!kb) return <Loading />;
+  const base = `/knowledge/${kb.id}`;
+  const usedBy = apps.filter((app) => app.manifest.knowledge_base_ids.includes(kb.id));
+  return (
+    <div className="sub-layout">
+      <aside className="sub-side">
+        <Link className="back" to="/knowledge"><ArrowLeft size={14} />全部知识库</Link>
+        <div style={{ padding: '0 6px 14px' }}><strong style={{ display: 'block' }}>{kb.name}</strong><span className="faint">{kb.file_count} 个文件 · {kb.chunk_count.toLocaleString()} 个分块</span></div>
+        <NavLink end to={base} className={({ isActive }) => `sub-link ${isActive ? 'active' : ''}`}><FileText size={16} />数据集</NavLink>
+        <NavLink to={`${base}/search`} className={({ isActive }) => `sub-link ${isActive ? 'active' : ''}`}><FlaskConical size={16} />检索测试</NavLink>
+        <NavLink to={`${base}/settings`} className={({ isActive }) => `sub-link ${isActive ? 'active' : ''}`}><Settings2 size={16} />配置</NavLink>
+        <div className="divider" />
+        <div className="faint" style={{ padding: '0 6px 6px' }}>引用本库的应用</div>
+        {usedBy.length ? usedBy.map((app) => <Link key={app.id} to={`/apps/${app.id}`} className="sub-link" style={{ fontSize: 13 }}>{app.name}</Link>) : <span className="faint" style={{ padding: '0 6px' }}>暂无</span>}
+      </aside>
+      <section className="sub-main">
+        <Routes>
+          <Route index element={<FilesView kb={kb} onChanged={reload} />} />
+          <Route path="files/:fileId" element={<ChunksView kb={kb} />} />
+          <Route path="search" element={<SearchView kb={kb} />} />
+          <Route path="settings" element={<SettingsView kb={kb} onSaved={setKb} />} />
+        </Routes>
+      </section>
+    </div>
+  );
+}
+
+/* ------------------------------ 数据集 ------------------------------ */
+
+function FilesView({ kb, onChanged }: { kb: ApiKnowledgeBase; onChanged: () => void }) {
+  const navigate = useNavigate();
+  const toast = useToast();
+  const [files, setFiles] = useState<ApiKnowledgeFile[] | null>(null);
+  const [jobs, setJobs] = useState<ApiImportJob[]>([]);
+  const [filter, setFilter] = useState<'all' | 'ready' | 'active' | 'failed'>('all');
+  const [q, setQ] = useState('');
+  const [rechunk, setRechunk] = useState<{ file: ApiKnowledgeFile; config: ApiChunkConfig } | null>(null);
+  const [removing, setRemoving] = useState<ApiKnowledgeFile | null>(null);
+  const [meta, setMeta] = useState<ApiKnowledgeFile | null>(null);
+  const [busy, setBusy] = useState('');
+
+  const load = useCallback(async () => {
+    const [loadedFiles, loadedJobs] = await Promise.all([
+      apiFetch<ApiKnowledgeFile[]>(`/knowledge-bases/${kb.id}/files`),
+      apiFetch<ApiImportJob[]>(`/knowledge-bases/${kb.id}/import-jobs`),
+    ]);
+    setFiles(loadedFiles);
+    setJobs(loadedJobs);
+    return loadedFiles;
+  }, [kb.id]);
+
+  useEffect(() => { void load().catch((caught) => toast(errorMessage(caught), 'error')); }, [load, toast]);
+
+  const latestJob = useMemo(() => {
+    const map: Record<string, ApiImportJob> = {};
+    for (const job of jobs) if (!map[job.file_id] || job.created_at > map[job.file_id].created_at) map[job.file_id] = job;
+    return map;
+  }, [jobs]);
+  // 重试后到 worker 接手前文件仍是旧状态，所以同时看最新任务的状态
+  const isActive = (file: ApiKnowledgeFile) => ACTIVE_STATUSES.has(file.status) || ACTIVE_STATUSES.has(latestJob[file.id]?.status ?? '');
+  const activeCount = files?.filter(isActive).length ?? 0;
   useEffect(() => {
-    if (!activeJobs.length) return;
-    const timer = window.setTimeout(async () => {
-      try {
-        const refreshed = await Promise.all(activeJobs.map((job) => apiFetch<ApiImportJob>(`/knowledge-bases/import-jobs/${job.id}`)));
-        setJobs((current) => current.map((job) => refreshed.find((item) => item.id === job.id) ?? job));
-        if (refreshed.every((job) => !activeStatuses.has(job.status))) await load();
-      } catch (caught) {
-        setError(errorMessage(caught));
-      }
-    }, 1000);
-    return () => window.clearTimeout(timer);
-  }, [activeJobs.map((job) => `${job.id}:${job.status}`).join('|'), load]);
+    if (!activeCount) return undefined;
+    const timer = window.setInterval(() => {
+      void load().then((latest) => { if (!latest.some((file) => ACTIVE_STATUSES.has(file.status))) onChanged(); });
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [activeCount, load, onChanged]);
 
-  const startImport = async () => {
-    if (!selectedFiles.length || !id) return;
-    setUploading(true);
+  const rows = (files ?? []).filter((file) => {
+    if (q && !file.filename.includes(q)) return false;
+    if (filter === 'ready') return file.status === 'completed';
+    if (filter === 'active') return isActive(file);
+    if (filter === 'failed') return file.status === 'failed';
+    return true;
+  });
+
+  const retry = async (file: ApiKnowledgeFile, config?: ApiChunkConfig) => {
+    setBusy(file.id);
     try {
-      if (ocrId !== (kb?.ocr_model_id ?? '')) {
-        const updated = await apiFetch<ApiKnowledgeBase>(`/knowledge-bases/${id}`, { method: 'PATCH', body: JSON.stringify({ ocr_model_id: ocrId || null }) });
-        setKb(updated);
-      }
-      const created: ApiImportJob[] = [];
-      const failures: string[] = [];
-      for (const file of selectedFiles) {
-        try {
-          const form = new FormData();
-          form.append('upload', file);
-          const response = await apiFetch<{ file: ApiKnowledgeFile; job: ApiImportJob }>(`/knowledge-bases/${id}/files`, { method: 'POST', body: form });
-          created.push(response.job);
-        } catch (caught) {
-          failures.push(`${file.name}：${errorMessage(caught)}`);
-        }
-      }
-      if (created.length) {
-        setJobs((current) => [...created, ...current]);
-        setSelectedFiles([]);
-        setImportOpen(false);
-        setTaskOpen(true);
-        showToast(`${created.length} 个文件已提交构建${failures.length ? `，${failures.length} 个失败` : ''}`);
-        await load();
-      }
-      if (failures.length) showToast(failures.join('；'), 'error');
-    } catch (caught) {
-      showToast(errorMessage(caught));
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  const rebuild = async () => {
-    if (!id) return;
-    try {
-      const created = await apiFetch<ApiImportJob[]>(`/knowledge-bases/${id}/rebuild`, { method: 'POST' });
-      setJobs((current) => [...created, ...current]);
-      setTaskOpen(true);
-      showToast('重建任务已提交');
-    } catch (caught) {
-      showToast(errorMessage(caught));
-    }
-  };
-
-  const saveChunkSettings = async () => {
-    if (!id) return;
-    setSavingSettings(true);
-    try {
-      const updated = await apiFetch<ApiKnowledgeBase>(`/knowledge-bases/${id}`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          chunk_method: chunkMethod,
-          chunk_size: chunkSize,
-          chunk_overlap: chunkOverlap,
-          parent_chunk_size: parentChunkSize,
-          child_chunk_size: childChunkSize,
-          semantic_llm_model_id: chunkMethod === 'semantic' ? semanticLlmId : null,
-          metadata_llm_model_id: metadataLlmId || null,
-        }),
-      });
-      setKb(updated);
-      setSettingsOpen(false);
-      showToast('索引配置已保存，请重建索引后生效');
-    } catch (caught) {
-      showToast(errorMessage(caught));
-    } finally {
-      setSavingSettings(false);
-    }
-  };
-
-  const openMetadata = (file: ApiKnowledgeFile) => {
-    const metadata = file.document_metadata ?? {};
-    setMetadataFile(file);
-    setMetadataTime(metadata.document_time ?? '');
-    setMetadataVersion(metadata.version ?? '');
-    setMetadataSubjects((metadata.subjects ?? []).join('、'));
-    setMetadataOwner(metadata.owner ?? '');
-    setMetadataKeywords((metadata.keywords ?? []).join('、'));
-    setMetadataQuestions((metadata.likely_questions ?? []).join('\n'));
-  };
-
-  const saveMetadata = async () => {
-    if (!id || !metadataFile) return;
-    setSavingMetadata(true);
-    try {
-      await apiFetch<ApiKnowledgeFile>(`/knowledge-bases/${id}/files/${metadataFile.id}/metadata`, {
-        method: 'PATCH',
-        body: JSON.stringify({
-          document_time: metadataTime.trim() || null,
-          version: metadataVersion.trim() || null,
-          subjects: splitMetadataList(metadataSubjects),
-          owner: metadataOwner.trim() || null,
-          keywords: splitMetadataList(metadataKeywords),
-          likely_questions: splitMetadataList(metadataQuestions),
-        }),
-      });
-      setMetadataFile(null);
-      showToast('元数据已保存，相关分块已标记为待重建');
+      await apiFetch(`/knowledge-bases/${kb.id}/files/${file.id}/retry`, { method: 'POST', body: JSON.stringify(config ? { chunk_config: config } : {}) });
+      toast(config ? `已按「${METHOD_LABEL[config.method]}」重新切块` : '已重新处理');
       await load();
+      onChanged();
     } catch (caught) {
-      showToast(errorMessage(caught));
+      toast(errorMessage(caught), 'error');
     } finally {
-      setSavingMetadata(false);
+      setBusy('');
     }
   };
 
-  const displayJobs = activeJobs.length ? activeJobs : jobs.slice(0, 1);
-  const displayJob = displayJobs[0];
-  const averageProgress = displayJobs.length ? Math.round(displayJobs.reduce((sum, job) => sum + job.progress, 0) / displayJobs.length) : 0;
-  const failedFiles = files.filter((file) => file.status === 'failed');
-  const embeddingName = useMemo(() => models.find((model) => model.id === kb?.embedding_model_id)?.display_name ?? '未配置', [kb, models]);
-  const ocrName = useMemo(() => models.find((model) => model.id === kb?.ocr_model_id)?.display_name ?? '未配置', [kb, models]);
-  const metadataModelName = useMemo(() => models.find((model) => model.id === kb?.metadata_llm_model_id)?.display_name ?? '基础规则', [kb, models]);
-  const ocrModels = models.filter((model) => model.model_type === 'ocr' && model.is_enabled && model.connection_status !== 'error');
-  const llms = models.filter((model) => model.model_type === 'llm' && model.is_enabled && model.connection_status !== 'error');
-  const imageSelected = selectedFiles.some((file) => ['.png', '.jpg', '.jpeg', '.webp'].some((extension) => file.name.toLowerCase().endsWith(extension)));
-
-  if (!kb) return <main className="page page-enter">{error ? <Notice tone="error" title="无法加载知识库">{error}</Notice> : <div className="card empty-state"><LoaderCircle className="spin" /><h2>正在加载知识库</h2></div>}</main>;
+  const failedCount = files?.filter((file) => file.status === 'failed').length ?? 0;
+  const rechunkProblem = rechunk ? configProblem(rechunk.config, kb) : null;
 
   return (
-    <div className="workspace-with-resource">
-      <KnowledgeNav id={kb.id} name={kb.name} />
-      <main className="page page-enter resource-page">
-        <PageHeader eyebrow="知识库 / 文件与任务" title={kb.name} description={kb.description || '尚未填写知识库说明。'} actions={<><Button icon={<Settings2 size={16} />} onClick={() => setSettingsOpen(true)}>索引设置</Button><Button icon={<RefreshCw size={16} />} onClick={() => { setTaskOpen(true); void load(); }}>查看构建任务</Button><Button variant="primary" icon={<Plus size={17} />} onClick={() => navigate(`/knowledge/${kb.id}/import`)}>导入数据</Button></>} />
-        {error ? <Notice tone="error" title="后端请求失败">{error}</Notice> : null}
-        <div className="detail-summary"><div><span>文件</span><strong>{kb.file_count}</strong></div><div><span>可用分块</span><strong>{kb.chunk_count.toLocaleString()}</strong></div><div><span>切块方式</span><strong>{kb.chunk_method === 'parent_child' ? '父子切分' : kb.chunk_method === 'semantic' ? '语义切分' : '结构递归'}</strong></div><div><span>向量模型</span><strong>{embeddingName}</strong></div><div><span>元数据抽取</span><strong>{metadataModelName}</strong></div><div><span>OCR 模型</span><strong>{ocrName}</strong></div><div><span>最后更新</span><strong>{formatDateTime(kb.updated_at)}</strong></div></div>
-        {failedFiles.length ? <Notice tone="warning" title={`${failedFiles.length} 个文件需要处理`}>{failedFiles.map((file) => `${file.filename}：${file.error_message ?? '处理失败'}`).join('；')}</Notice> : null}
-        <section className="card table-card">
-          <div className="table-heading"><div><h2>已导入文件</h2><p>支持 DOCX、PDF、Markdown、图片、XLSX/XLSM 和 CSV</p></div><Button icon={<RefreshCw size={15} />} onClick={rebuild} disabled={!files.length}>重建全部索引</Button></div>
-          <table className="data-table"><thead><tr><th>文件</th><th>处理状态</th><th>分块</th><th>元数据</th><th>更新时间</th><th>错误</th></tr></thead><tbody>{files.map((file) => { const Icon = iconFor(file.extension); const metadataReady = Boolean(file.document_metadata?.extraction_status); return <tr key={file.id}><td><div className="file-cell"><span className="row-icon"><Icon size={17} /></span><span><strong>{file.filename}</strong><small>{file.extension.toUpperCase()} · {formatBytes(file.size_bytes)}{file.page_count ? ` · ${file.page_count} 页` : ''}</small></span></div></td><td><Badge tone={file.status === 'completed' ? 'success' : file.status === 'failed' ? 'error' : 'warning'}>{statusLabels[file.status] ?? file.status}</Badge></td><td>{file.chunk_count || '—'}</td><td><Button variant="ghost" icon={<Tags size={15} />} disabled={!metadataReady} onClick={() => openMetadata(file)}>{metadataReady ? '查看 / 编辑' : '待抽取'}</Button></td><td>{formatDateTime(file.updated_at)}</td><td>{file.error_message ?? '—'}</td></tr>; })}</tbody></table>
-          <div className="mobile-card-list">{files.map((file) => <div className="mobile-file-card" key={file.id}><div><strong>{file.filename}</strong><small>{formatBytes(file.size_bytes)} · {file.chunk_count ? `${file.chunk_count} 个分块` : '未生成分块'}</small></div><Button variant="ghost" icon={<Tags size={15} />} disabled={!file.document_metadata?.extraction_status} onClick={() => openMetadata(file)}>元数据</Button></div>)}</div>
-          {!files.length ? <div className="empty-state"><UploadCloud size={28} /><h2>还没有知识文件</h2><p>导入第一份资料以开始构建索引。</p></div> : null}
-        </section>
+    <div className="page">
+      <div className="page-head">
+        <div className="grow"><h1>数据集</h1><p>每个文件独立设置切块方式，可随时重新切块，不影响其他文件。</p></div>
+        <button className="btn" onClick={() => void load()}><RefreshCw size={15} />刷新</button>
+        <button className="btn primary" onClick={() => navigate(`/knowledge/${kb.id}/import`)}><Upload size={15} />导入数据</button>
+      </div>
+      <div className="row" style={{ marginBottom: 12 }}>
+        <div className="seg">
+          {([['all', '全部'], ['ready', '已就绪'], ['active', '处理中'], ['failed', '失败']] as const).map(([key, label]) => (
+            <button key={key} className={filter === key ? 'active' : ''} onClick={() => setFilter(key)}>{label}{key === 'failed' && failedCount ? <Tag tone="red">{failedCount}</Tag> : null}{key === 'active' && activeCount ? <Tag tone="blue">{activeCount}</Tag> : null}</button>
+          ))}
+        </div>
+        <span className="grow" />
+        <div className="search-box" style={{ width: 240 }}><Search size={15} /><input className="input sm" aria-label="搜索文件名" placeholder="搜索文件名" value={q} onChange={(event) => setQ(event.target.value)} /></div>
+      </div>
+      {!files ? <Loading /> : null}
+      {files && !files.length ? <Empty icon={<Upload size={26} />} title="还没有数据" desc="导入文件、网页或文本后会在这里看到处理进度和分块。" action={<button className="btn primary" onClick={() => navigate(`/knowledge/${kb.id}/import`)}>导入数据</button>} /> : null}
+      {rows.length ? (
+        <table className="table">
+          <thead><tr><th>名称</th><th>切块方式</th><th>分块数</th><th>状态</th><th>更新时间</th><th style={{ width: 200 }}>操作</th></tr></thead>
+          <tbody>
+            {rows.map((file) => {
+              const job = latestJob[file.id];
+              const status = FILE_STATUS[file.status] ?? { label: file.status, tone: '' };
+              const method = (file.chunk_config?.method ?? kb.chunk_method) as ApiChunkConfig['method'];
+              return (
+                <tr key={file.id} className="clickable" onClick={() => file.status === 'completed' && navigate(`/knowledge/${kb.id}/files/${file.id}`)}>
+                  <td><div className="row"><FileIcon file={file} /><div><div style={{ fontWeight: 500 }}>{file.filename}</div><div className="faint">{formatBytes(file.size_bytes)}{file.page_count ? ` · ${file.page_count} 页` : ''}</div></div></div></td>
+                  <td><Tag tone="blue">{METHOD_LABEL[method] ?? method}</Tag></td>
+                  <td>{file.chunk_count || '—'}</td>
+                  <td>
+                    {isActive(file) && job ? (
+                      <div style={{ width: 140 }}><div className="row faint" style={{ marginBottom: 4 }}><Spinner size={12} />{STAGE_LABEL[job.current_stage] ?? job.current_stage} {job.progress}%</div><div className="progress"><i style={{ width: `${job.progress}%` }} /></div></div>
+                    ) : <div><Tag tone={status.tone}>{file.status === 'failed' ? <AlertCircle size={12} /> : null}{status.label}</Tag>{file.error_message ? <div className="faint clamp-2" style={{ marginTop: 4, maxWidth: 260 }}>{file.error_message}</div> : null}</div>}
+                  </td>
+                  <td className="faint">{formatTime(file.updated_at)}</td>
+                  <td onClick={(event) => event.stopPropagation()}>
+                    <div className="row" style={{ gap: 2 }}>
+                      {file.status === 'failed' && !isActive(file) ? <button className="btn sm" disabled={busy === file.id} onClick={() => void retry(file)}>{busy === file.id ? <Spinner size={12} /> : null}重试</button> : null}
+                      <button className="btn sm ghost" disabled={isActive(file)} onClick={() => setRechunk({ file, config: { ...defaultChunkConfig(kb), ...file.chunk_config } })}>重新切块</button>
+                      <button className="btn sm ghost icon" aria-label="元数据" title="元数据" disabled={!file.document_metadata?.extraction_status} onClick={() => setMeta(file)}><Tags size={14} /></button>
+                      <button className="btn sm ghost icon" aria-label={`删除 ${file.filename}`} title="删除" onClick={() => setRemoving(file)}><Trash2 size={14} /></button>
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      ) : files?.length ? <Empty title="没有符合条件的文件" /> : null}
 
-        <Modal open={settingsOpen} title="索引增强设置" description="调整后现有向量会标记为待重建，重建完成后新策略才会生效。" onClose={() => setSettingsOpen(false)} footer={<><Button onClick={() => setSettingsOpen(false)}>取消</Button><Button variant="primary" disabled={savingSettings || chunkOverlap >= chunkSize || childChunkSize >= parentChunkSize || (chunkMethod === 'semantic' && !semanticLlmId)} onClick={() => void saveChunkSettings()}>{savingSettings ? '保存中…' : '保存设置'}</Button></>}>
-          <div className="form-stack">
-            <label className="form-label">元数据抽取 LLM<select className="field" value={metadataLlmId} onChange={(event) => setMetadataLlmId(event.target.value)}><option value="">基础规则抽取</option>{llms.map((model) => <option value={model.id} key={model.id}>{model.display_name} · {model.provider}</option>)}</select><small>构建时自动抽取时间、版本、主体、负责人、关键词和可能问题，并加入每个分块的向量化输入。</small></label>
-            <Notice tone="info" title="元数据用于召回增强">原始正文不会被改写；模型抽取失败会让构建任务明确失败，不会把空结果伪装成成功。</Notice>
-            <label className="form-label">切块方式<select className="field" value={chunkMethod} onChange={(event) => setChunkMethod(event.target.value as ApiKnowledgeBase['chunk_method'])}><option value="recursive">结构递归切分</option><option value="parent_child">父子切分</option><option value="semantic">LLM 语义切分</option></select></label>
-            {chunkMethod === 'recursive' ? <div className="inline-fields"><label className="form-label">块大小<input className="field" type="number" min="100" max="4000" value={chunkSize} onChange={(event) => setChunkSize(Number(event.target.value))} /></label><label className="form-label">重叠字符<input className="field" type="number" min="0" max="1000" value={chunkOverlap} onChange={(event) => setChunkOverlap(Number(event.target.value))} /></label></div> : null}
-            {chunkMethod === 'parent_child' ? <><div className="inline-fields"><label className="form-label">父块大小<input className="field" type="number" min="200" max="12000" value={parentChunkSize} onChange={(event) => setParentChunkSize(Number(event.target.value))} /></label><label className="form-label">子块大小<input className="field" type="number" min="80" max="4000" value={childChunkSize} onChange={(event) => setChildChunkSize(Number(event.target.value))} /></label></div><Notice tone="info" title="召回小块，返回完整上下文">子块用于向量匹配；命中后将父块提供给 Rerank 和 LLM，减少断章取义。</Notice></> : null}
-            {chunkMethod === 'semantic' ? <><label className="form-label">语义切分 LLM<select className="field" value={semanticLlmId} onChange={(event) => setSemanticLlmId(event.target.value)}><option value="">请选择</option>{llms.map((model) => <option value={model.id} key={model.id}>{model.display_name} · {model.provider}</option>)}</select></label><label className="form-label">单次安全输入上限<input className="field" type="number" min="2000" max="8000" value={parentChunkSize} onChange={(event) => setParentChunkSize(Number(event.target.value))} /></label><Notice tone="warning" title="会产生额外 LLM 调用">系统要求模型只返回原文分段；如果模型改写内容或返回无效 JSON，本次构建会明确失败。</Notice></> : null}
+      <Modal open={!!rechunk} wide title={`重新切块：${rechunk?.file.filename ?? ''}`} onClose={() => setRechunk(null)}
+        footer={<><button className="btn" onClick={() => setRechunk(null)}>取消</button><button className="btn primary" disabled={!!rechunkProblem || busy === rechunk?.file.id} onClick={async () => { if (rechunk) { await retry(rechunk.file, rechunk.config); setRechunk(null); } }}>确认重新切块</button></>}>
+        {rechunk ? <>
+          <p className="muted" style={{ marginBottom: 12 }}>会重新解析该文件并替换它的全部分块与向量；人工编辑过的元数据会保留。</p>
+          <MethodPicker kb={kb} value={rechunk.config.method} recommended={recommendedMethod(rechunk.file.filename).method} onChange={(method) => setRechunk({ ...rechunk, config: { ...rechunk.config, method } })} />
+          <div style={{ marginTop: 16 }}><ChunkConfigFields config={rechunk.config} patch={(patch) => setRechunk({ ...rechunk, config: { ...rechunk.config, ...patch } })} /></div>
+          {rechunkProblem ? <Notice tone="error">{rechunkProblem}</Notice> : null}
+        </> : null}
+      </Modal>
+
+      <ConfirmModal open={!!removing} danger title="删除文件" confirmText="删除" body={<>将删除「{removing?.filename}」及其全部分块和向量，引用本库的应用将无法再检索到这些内容。</>}
+        onClose={() => setRemoving(null)}
+        onConfirm={async () => {
+          if (!removing) return;
+          try {
+            await apiFetch(`/knowledge-bases/${kb.id}/files/${removing.id}`, { method: 'DELETE' });
+            toast('文件已删除');
+            await load();
+            onChanged();
+          } catch (caught) { toast(errorMessage(caught), 'error'); }
+        }} />
+
+      <MetadataDrawer kb={kb} file={meta} onClose={() => setMeta(null)} onSaved={() => void load()} />
+    </div>
+  );
+}
+
+function MetadataDrawer({ kb, file, onClose, onSaved }: { kb: ApiKnowledgeBase; file: ApiKnowledgeFile | null; onClose: () => void; onSaved: () => void }) {
+  const toast = useToast();
+  const [draft, setDraft] = useState({ document_time: '', version: '', owner: '', subjects: '', keywords: '', likely_questions: '' });
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const value = file?.document_metadata ?? {};
+    setDraft({
+      document_time: value.document_time ?? '', version: value.version ?? '', owner: value.owner ?? '',
+      subjects: (value.subjects ?? []).join('、'), keywords: (value.keywords ?? []).join('、'), likely_questions: (value.likely_questions ?? []).join('\n'),
+    });
+  }, [file]);
+  const list = (text: string) => text.split(/[\n,，、]+/).map((item) => item.trim()).filter(Boolean);
+  return (
+    <Drawer open={!!file} title="文件元数据" onClose={onClose}
+      footer={<><button className="btn" onClick={onClose}>取消</button><button className="btn primary" disabled={busy} onClick={async () => {
+        if (!file) return;
+        setBusy(true);
+        try {
+          await apiFetch(`/knowledge-bases/${kb.id}/files/${file.id}/metadata`, { method: 'PATCH', body: JSON.stringify({ document_time: draft.document_time || null, version: draft.version || null, owner: draft.owner || null, subjects: list(draft.subjects), keywords: list(draft.keywords), likely_questions: list(draft.likely_questions) }) });
+          toast('元数据已保存，相关分块会重新向量化');
+          onSaved();
+          onClose();
+        } catch (caught) { toast(errorMessage(caught), 'error'); } finally { setBusy(false); }
+      }}>保存</button></>}>
+      {file ? <>
+        <p className="faint" style={{ marginBottom: 12 }}>{file.filename} · 抽取方式：{file.document_metadata?.extraction_method === 'llm' ? '模型抽取' : file.document_metadata?.extraction_method === 'manual' ? '人工编辑' : '规则抽取'}</p>
+        <div className="form-grid">
+          <Field label="时间"><input className="input" value={draft.document_time} onChange={(event) => setDraft({ ...draft, document_time: event.target.value })} /></Field>
+          <Field label="版本"><input className="input" value={draft.version} onChange={(event) => setDraft({ ...draft, version: event.target.value })} /></Field>
+        </div>
+        <Field label="负责人 / 部门"><input className="input" value={draft.owner} onChange={(event) => setDraft({ ...draft, owner: event.target.value })} /></Field>
+        <Field label="主体"><input className="input" value={draft.subjects} onChange={(event) => setDraft({ ...draft, subjects: event.target.value })} /></Field>
+        <Field label="检索关键词"><textarea className="textarea" value={draft.keywords} onChange={(event) => setDraft({ ...draft, keywords: event.target.value })} /></Field>
+        <Field label="可能被问到的问题" hint="每行一个，会加入分块的检索文本"><textarea className="textarea" style={{ minHeight: 120 }} value={draft.likely_questions} onChange={(event) => setDraft({ ...draft, likely_questions: event.target.value })} /></Field>
+      </> : null}
+    </Drawer>
+  );
+}
+
+/* ------------------------------ 分块管理 ------------------------------ */
+
+function ChunksView({ kb }: { kb: ApiKnowledgeBase }) {
+  const { fileId = '' } = useParams();
+  const toast = useToast();
+  const [file, setFile] = useState<ApiKnowledgeFile | null>(null);
+  const [chunks, setChunks] = useState<ApiChunk[] | null>(null);
+  const [q, setQ] = useState('');
+  const [editing, setEditing] = useState<ApiChunk | null>(null);
+  const [draft, setDraft] = useState({ title: '', content: '' });
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    Promise.all([apiFetch<ApiKnowledgeFile[]>(`/knowledge-bases/${kb.id}/files`), apiFetch<ApiChunk[]>(`/knowledge-bases/${kb.id}/chunks?file_id=${fileId}`)])
+      .then(([files, loaded]) => { setFile(files.find((item) => item.id === fileId) ?? null); setChunks(loaded); })
+      .catch((caught) => toast(errorMessage(caught), 'error'));
+  }, [kb.id, fileId, toast]);
+
+  const list = (chunks ?? []).filter((chunk) => !q || chunk.content.includes(q) || chunk.title.includes(q));
+  const method = (file?.chunk_config?.method ?? kb.chunk_method) as ApiChunkConfig['method'];
+
+  return (
+    <div className="page">
+      <div className="row faint" style={{ marginBottom: 8 }}><Link to={`/knowledge/${kb.id}`}>数据集</Link><ChevronRight size={13} /><span>{file?.filename ?? '文件'}</span></div>
+      <div className="page-head">
+        <div className="grow">
+          <h1>{file?.filename ?? '分块'}</h1>
+          <div className="row wrap" style={{ marginTop: 8 }}>
+            <Tag tone="blue">{METHOD_LABEL[method] ?? method}</Tag>
+            {file?.chunk_config ? <Tag>块大小 {file.chunk_config.chunk_size} · 重叠 {file.chunk_config.chunk_overlap}</Tag> : null}
+            <span className="faint">共 {chunks?.length ?? 0} 块</span>
           </div>
-        </Modal>
+        </div>
+      </div>
+      <div className="search-box" style={{ maxWidth: 360, marginBottom: 14 }}><Search size={15} /><input className="input sm" aria-label="搜索分块内容" placeholder="搜索分块内容" value={q} onChange={(event) => setQ(event.target.value)} /></div>
+      {!chunks ? <Loading /> : null}
+      {chunks && !list.length ? <Empty title="没有分块" /> : null}
+      <div className="grid c2" style={{ gap: 12 }}>
+        {list.map((chunk) => (
+          <button key={chunk.id} className="chunk-card" style={{ textAlign: 'left', cursor: 'pointer' }} onClick={() => { setEditing(chunk); setDraft({ title: chunk.title, content: chunk.content }); }}>
+            <header><span className="idx">#{chunk.ordinal}</span><span className="ellipsis grow">{chunk.title}</span>{chunk.page_number ? <span>第 {chunk.page_number} 页</span> : null}<span>{chunk.char_count} 字</span>{chunk.indexed ? null : <Tag tone="orange">未向量化</Tag>}</header>
+            <div className="body clamp-3">{chunk.content}</div>
+            {chunk.metadata_json.parent_content ? <div className="faint" style={{ marginTop: 6 }}>父块 {String(chunk.metadata_json.parent_content).length} 字</div> : null}
+          </button>
+        ))}
+      </div>
+      <Drawer open={!!editing} title={`编辑分块 #${editing?.ordinal ?? ''}`} onClose={() => setEditing(null)}
+        footer={<><button className="btn" onClick={() => setEditing(null)}>取消</button><button className="btn primary" disabled={busy || !draft.content.trim()} onClick={async () => {
+          if (!editing) return;
+          setBusy(true);
+          try {
+            const updated = await apiFetch<ApiChunk>(`/knowledge-bases/${kb.id}/chunks/${editing.id}`, { method: 'PATCH', body: JSON.stringify(draft) });
+            setChunks((current) => current?.map((item) => (item.id === updated.id ? updated : item)) ?? null);
+            toast('分块已保存，向量已更新');
+            setEditing(null);
+          } catch (caught) { toast(errorMessage(caught), 'error'); } finally { setBusy(false); }
+        }}>{busy ? <Spinner /> : null}保存</button></>}>
+        <Field label="标题"><input className="input" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></Field>
+        <Field label="内容" hint={`${draft.content.length} 字`}><textarea className="textarea" style={{ minHeight: 280 }} value={draft.content} onChange={(event) => setDraft({ ...draft, content: event.target.value })} /></Field>
+        {editing?.metadata_json.parent_content ? <Field label="父块（命中后返回给模型）"><div className="json-view">{String(editing.metadata_json.parent_content)}</div></Field> : null}
+      </Drawer>
+    </div>
+  );
+}
 
-        <Modal open={importOpen} title="导入知识文件" description="文件会依次执行解析、元数据抽取、分块和向量化。" onClose={() => setImportOpen(false)} footer={<><Button onClick={() => setImportOpen(false)}>取消</Button><Button variant="primary" icon={<UploadCloud size={17} />} disabled={!selectedFiles.length || uploading || (imageSelected && !ocrId)} onClick={startImport}>{uploading ? '上传中…' : `开始导入${selectedFiles.length ? `（${selectedFiles.length}）` : ''}`}</Button></>}>
-          <Notice tone={ocrId ? 'success' : 'warning'} title={ocrId ? '已选择云端 OCR' : '图片内容需要云端 OCR'}>{ocrId ? `将使用 ${models.find((model) => model.id === ocrId)?.display_name ?? '所选模型'} 解析图片与扫描页。` : '系统不会下载本地 OCR 模型；请选择 OCR，否则图片和扫描型 PDF 可能解析失败。'}</Notice>
-          <label className="form-label">OCR 模型<select className="field" value={ocrId} onChange={(event) => setOcrId(event.target.value)}><option value="">暂不使用</option>{ocrModels.map((model) => <option value={model.id} key={model.id}>{model.display_name} · {model.provider}</option>)}</select><small>该选择会保存到当前知识库，并用于后续导入和重建。</small></label>
-          {!ocrModels.length ? <Notice tone="error" title="没有可用 OCR 模型">请先到“模型服务”接入并启用 OCR 模型。</Notice> : null}
-          <label className={`upload-zone ${dragActive ? 'upload-zone--active' : ''}`} onDragEnter={(event) => { event.preventDefault(); setDragActive(true); }} onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy'; setDragActive(true); }} onDragLeave={(event) => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false); }} onDrop={(event) => { event.preventDefault(); setDragActive(false); setSelectedFiles(Array.from(event.dataTransfer.files)); }}><UploadCloud size={28} /><strong>{dragActive ? '松开以添加文件' : '拖放文件到这里，或点击选择'}</strong><span>DOCX、PDF、MD、PNG/JPG/WEBP、XLSX/XLSM、CSV · 单文件上限由后端配置</span><input type="file" multiple accept=".docx,.pdf,.md,.markdown,.png,.jpg,.jpeg,.webp,.xlsx,.xlsm,.csv" onChange={(event) => { setSelectedFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} /></label>
-          {selectedFiles.length ? <div className="sample-files"><header><strong>已选择 {selectedFiles.length} 个文件</strong></header>{selectedFiles.map((file) => <div key={`${file.name}-${file.size}`}><FileText size={17} /><span><strong>{file.name}</strong><small>{formatBytes(file.size)}</small></span><Check size={17} /></div>)}</div> : null}
-        </Modal>
+/* ------------------------------ 检索测试 ------------------------------ */
 
-        <Drawer open={Boolean(metadataFile)} title="文档元数据" description={metadataFile?.filename ?? ''} onClose={() => setMetadataFile(null)} footer={<><Button onClick={() => setMetadataFile(null)}>取消</Button><Button variant="primary" disabled={savingMetadata} onClick={() => void saveMetadata()}>{savingMetadata ? '保存中…' : '保存元数据'}</Button></>}>
-          {metadataFile ? <div className="form-stack metadata-editor">
-            <Notice tone={metadataFile.document_metadata.extraction_method === 'llm' ? 'success' : 'info'} title={metadataFile.document_metadata.extraction_method === 'llm' ? 'LLM 自动抽取' : metadataFile.document_metadata.extraction_method === 'manual' ? '人工修订' : '基础规则抽取'}>保存修改后，该文件的现有向量会失效；点击“重建全部索引”后，修订内容才会进入检索。</Notice>
-            <div className="inline-fields"><label className="form-label">时间<input className="field" value={metadataTime} onChange={(event) => setMetadataTime(event.target.value)} placeholder="例如：2026-10-26" /></label><label className="form-label">版本<input className="field" value={metadataVersion} onChange={(event) => setMetadataVersion(event.target.value)} placeholder="例如：V1.2" /></label></div>
-            <label className="form-label">主体信息<input className="field" value={metadataSubjects} onChange={(event) => setMetadataSubjects(event.target.value)} placeholder="企业、产品、制度对象或项目，用顿号分隔" /></label>
-            <label className="form-label">负责人 / 责任部门<input className="field" value={metadataOwner} onChange={(event) => setMetadataOwner(event.target.value)} placeholder="例如：人力资源部 / 张三" /></label>
-            <label className="form-label">检索关键词<textarea className="field compact-textarea" value={metadataKeywords} onChange={(event) => setMetadataKeywords(event.target.value)} placeholder="关键词之间用逗号、顿号或换行分隔" /></label>
-            <label className="form-label">可能被问到的问题<textarea className="field metadata-questions" value={metadataQuestions} onChange={(event) => setMetadataQuestions(event.target.value)} placeholder="每行一个可由本文回答的问题" /></label>
-            <div className="metadata-audit"><span>抽取时间</span><strong>{metadataFile.document_metadata.extracted_at ? formatDateTime(metadataFile.document_metadata.extracted_at) : '—'}</strong><span>抽取模型</span><strong>{models.find((model) => model.id === metadataFile.document_metadata.model_id)?.display_name ?? '基础规则 / 人工'}</strong></div>
-          </div> : null}
-        </Drawer>
+type Mode = 'semantic' | 'fulltext' | 'hybrid';
 
-        <Drawer open={taskOpen} title="构建任务" description={displayJob ? `任务 ${displayJob.id}` : '暂无构建任务'} onClose={() => setTaskOpen(false)} footer={<Button variant="primary" onClick={() => setTaskOpen(false)}>关闭</Button>}>
-          {displayJob ? <><div className="task-summary"><span>{displayJob.status === 'completed' ? <CheckCircle2 size={20} /> : displayJob.status === 'failed' ? <AlertTriangle size={20} /> : <LoaderCircle size={20} className="spin" />}</span><div><strong>{displayJob.status === 'completed' ? '知识索引构建完成' : displayJob.status === 'failed' ? '构建失败' : '正在构建知识索引'}</strong><p>{displayJobs.length} 个任务 · 当前阶段 {stageLabels[displayJob.current_stage] ?? displayJob.current_stage}</p></div><em>{averageProgress}%</em></div><div className="progress-track"><div className="progress-value" style={{ width: `${averageProgress}%` }} /></div><ol className="stage-list">{displayJob.stage_details.map((item, index) => <li className={`stage-item stage-item--${item.status === 'active' ? 'active' : item.status === 'success' ? 'done' : item.status === 'error' ? 'active' : 'pending'}`} key={`${item.name}-${index}`}><span>{item.status === 'success' ? <Check size={16} /> : item.status === 'active' ? <LoaderCircle size={16} className="spin" /> : item.status === 'error' ? <AlertTriangle size={16} /> : index + 1}</span><div><strong>{stageLabels[item.name] ?? item.name}</strong><small>{item.detail}</small></div></li>)}</ol>{displayJob.error_message ? <Notice tone="error" title="任务失败">{displayJob.error_message}</Notice> : null}</> : <Notice tone="info" title="暂无任务">导入文件或点击重建后，可在这里查看实时进度。</Notice>}
-        </Drawer>
-      </main>
+function SearchView({ kb }: { kb: ApiKnowledgeBase }) {
+  const toast = useToast();
+  const [query, setQuery] = useState('');
+  const [mode, setMode] = useState<Mode>(kb.embedding_model_id ? 'hybrid' : 'fulltext');
+  const [topK, setTopK] = useState(8);
+  const [rerankN, setRerankN] = useState(3);
+  const [threshold, setThreshold] = useState(0);
+  const [result, setResult] = useState<ApiRetrievalResponse | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [history, setHistory] = useState<string[]>([]);
+
+  const run = async (text = query) => {
+    if (!text.trim()) return;
+    setBusy(true);
+    try {
+      setResult(await apiFetch<ApiRetrievalResponse>(`/knowledge-bases/${kb.id}/retrieval-test`, { method: 'POST', body: JSON.stringify({ query: text.trim(), mode, top_k: topK, rerank_top_n: Math.min(rerankN, topK), score_threshold: threshold }) }));
+      setHistory((items) => [text.trim(), ...items.filter((item) => item !== text.trim())].slice(0, 6));
+    } catch (caught) {
+      toast(errorMessage(caught), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const words = query.trim().split(/\s+/).filter((item) => item.length > 1);
+  const highlight = (text: string) => {
+    if (!words.length) return text;
+    const re = new RegExp(`(${words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'g');
+    return text.split(re).map((part, index) => (words.includes(part) ? <mark key={index} style={{ background: '#fef0c7', padding: '0 2px', borderRadius: 3 }}>{part}</mark> : part));
+  };
+
+  return (
+    <div className="page" style={{ display: 'flex', gap: 24, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+      <div style={{ width: 380, maxWidth: '100%', flex: 'none' }}>
+        <h1 style={{ fontSize: 20, fontWeight: 600 }}>检索测试</h1>
+        <p className="muted" style={{ margin: '4px 0 16px' }}>用真实问题验证召回效果；参数可在应用的知识库设置中复用。</p>
+        <div className="card pad">
+          <textarea className="textarea" aria-label="测试问题" placeholder="输入一个用户可能会问的问题" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void run(); }} />
+          <Field label="检索模式">
+            <div className="seg" style={{ width: '100%' }}>
+              {([['semantic', '语义'], ['fulltext', '全文'], ['hybrid', '混合']] as const).map(([key, label]) => <button key={key} style={{ flex: 1 }} disabled={key !== 'fulltext' && !kb.embedding_model_id} className={mode === key ? 'active' : ''} onClick={() => setMode(key)}>{label}</button>)}
+            </div>
+            <p className="faint" style={{ marginTop: 6 }}>{mode === 'semantic' ? '按语义相似度召回，擅长同义表达。' : mode === 'fulltext' ? '按关键词匹配，擅长编号、型号、条款号。' : '语义与全文并行召回，RRF 融合排序。'}</p>
+          </Field>
+          <Field label="初召回数量"><Slider label="初召回数量" value={topK} min={1} max={50} onChange={setTopK} /></Field>
+          <Field label="重排后保留" hint={kb.rerank_model_id ? '已配置重排模型' : '未配置重排模型'}><Slider label="重排后保留" value={rerankN} min={1} max={20} onChange={setRerankN} /></Field>
+          <Field label="最低相关度"><Slider label="最低相关度" value={threshold} min={0} max={1} step={0.05} onChange={setThreshold} /></Field>
+          <button className="btn primary" style={{ width: '100%' }} disabled={busy || !query.trim()} onClick={() => void run()}>{busy ? <Spinner /> : <Search size={15} />}测试</button>
+        </div>
+        {history.length ? <><div className="section-title" style={{ fontSize: 13 }}>本次测试历史</div>{history.map((item) => <button key={item} className="sub-link" onClick={() => { setQuery(item); void run(item); }}><Search size={13} className="muted" />{item}</button>)}</> : null}
+      </div>
+      <div className="grow" style={{ minWidth: 320 }}>
+        {result ? <>
+          <div className="row wrap" style={{ marginBottom: 12, marginTop: 4 }}>
+            <strong>召回结果</strong><Tag>{mode === 'semantic' ? '语义检索' : mode === 'fulltext' ? '全文检索' : '混合检索'}</Tag>
+            <span className="faint">召回 {result.recalled_count} 条 · 返回 {result.returned_count} 条 · 耗时 {result.total_duration_ms}ms{result.rerank_applied ? ' · 已重排' : ''}</span>
+            {result.simulated ? <Tag tone="orange">测试替身</Tag> : null}
+          </div>
+          {!result.results.length ? <Empty title="没有达到阈值的结果" desc="可以降低最低相关度，或换用混合检索。" /> : null}
+          <div className="col" style={{ gap: 12 }}>
+            {result.results.map((item, index) => (
+              <div key={item.chunk_id} className="chunk-card">
+                <header>
+                  <span className="idx">TOP {index + 1}</span>
+                  {item.vector_score ? <Tag tone="blue">语义 <span className="score">{item.vector_score.toFixed(3)}</span></Tag> : null}
+                  {item.keyword_score != null ? <Tag tone="teal">全文 <span className="score">{item.keyword_score.toFixed(3)}</span></Tag> : null}
+                  {item.rerank_score != null ? <Tag tone="green">重排 <span className="score">{item.rerank_score.toFixed(3)}</span></Tag> : null}
+                  <Tag tone="purple">综合 <span className="score">{item.final_score.toFixed(3)}</span></Tag>
+                  <span className="grow" /><span className="ellipsis">{item.filename}{item.page_number ? ` · 第 ${item.page_number} 页` : ''}</span>
+                </header>
+                <div style={{ fontSize: 12, color: 'var(--text-3)', marginBottom: 4 }}>{item.title}</div>
+                <div className="body">{highlight(item.content)}</div>
+              </div>
+            ))}
+          </div>
+        </> : <Empty icon={<FlaskConical size={26} />} title="输入问题开始测试" desc="对比不同检索模式下的召回差异，编号类问题建议用混合或全文检索。" />}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------ 配置 ------------------------------ */
+
+function SettingsView({ kb, onSaved }: { kb: ApiKnowledgeBase; onSaved: (kb: ApiKnowledgeBase) => void }) {
+  const navigate = useNavigate();
+  const toast = useToast();
+  const [options, setOptions] = useState<ApiModelOption[]>([]);
+  const [draft, setDraft] = useState({ ...kb });
+  const [busy, setBusy] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [rebuild, setRebuild] = useState(false);
+  useEffect(() => { apiFetch<ApiModelOption[]>('/model-options').then(setOptions).catch(() => undefined); }, []);
+  useEffect(() => setDraft({ ...kb }), [kb]);
+
+  const select = (key: 'embedding_model_id' | 'rerank_model_id' | 'ocr_model_id' | 'semantic_llm_model_id' | 'metadata_llm_model_id', type: ApiModelOption['model_type'], empty?: string) => (
+    <select className="select" value={draft[key] ?? ''} onChange={(event) => setDraft({ ...draft, [key]: event.target.value || null })}>
+      {empty ? <option value="">{empty}</option> : null}
+      {modelsOf(options, type).map((model) => <option key={model.id} value={model.id}>{model.display_name} · {model.provider}</option>)}
+    </select>
+  );
+  const embeddingChanged = draft.embedding_model_id !== kb.embedding_model_id;
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const updated = await apiFetch<ApiKnowledgeBase>(`/knowledge-bases/${kb.id}`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          name: draft.name, description: draft.description, embedding_model_id: draft.embedding_model_id, rerank_model_id: draft.rerank_model_id,
+          ocr_model_id: draft.ocr_model_id, semantic_llm_model_id: draft.semantic_llm_model_id, metadata_llm_model_id: draft.metadata_llm_model_id,
+          chunk_method: draft.chunk_method, chunk_size: draft.chunk_size, chunk_overlap: draft.chunk_overlap,
+        }),
+      });
+      onSaved(updated);
+      toast(embeddingChanged ? '已保存。索引模型已变更，请重建全部索引' : '配置已保存');
+    } catch (caught) {
+      toast(errorMessage(caught), 'error');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="page" style={{ maxWidth: 880 }}>
+      <div className="page-head"><div className="grow"><h1>配置</h1><p>新导入文件的默认设置；已导入的文件保留各自的切块方式。</p></div><button className="btn primary" disabled={busy || !draft.name.trim()} onClick={() => void save()}>{busy ? <Spinner /> : null}保存</button></div>
+      <div className="card pad">
+        <div className="section-title" style={{ marginTop: 0 }}>基础信息</div>
+        <Field label="名称" required><input className="input" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></Field>
+        <Field label="简介" hint="Agent 依据简介判断何时检索本库"><textarea className="textarea" style={{ minHeight: 60 }} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} /></Field>
+      </div>
+      <div className="card pad" style={{ marginTop: 16 }}>
+        <div className="section-title" style={{ marginTop: 0 }}>模型</div>
+        <div className="form-grid">
+          <Field label="索引模型" hint="变更后需重建">{select('embedding_model_id', 'embedding', '不使用（仅全文检索）')}</Field>
+          <Field label="重排模型">{select('rerank_model_id', 'rerank', '不使用')}</Field>
+          <Field label="语义分块模型">{select('semantic_llm_model_id', 'llm', '不使用')}</Field>
+          <Field label="元数据抽取模型">{select('metadata_llm_model_id', 'llm', '规则抽取')}</Field>
+          <Field label="图片理解 / OCR">{select('ocr_model_id', 'ocr', '不处理图片')}</Field>
+        </div>
+        {embeddingChanged ? <Notice tone="warn">索引模型变更后，已有向量与新模型不兼容，需要「重建全部索引」后检索才会恢复。</Notice> : null}
+      </div>
+      <div className="card pad" style={{ marginTop: 16 }}>
+        <div className="section-title" style={{ marginTop: 0 }}>新文件默认切块</div>
+        <MethodPicker kb={draft} value={draft.chunk_method} onChange={(method) => setDraft({ ...draft, chunk_method: method })} />
+        <div className="form-grid" style={{ marginTop: 14 }}>
+          <Field label="块大小"><input className="input" type="number" min={100} max={4000} value={draft.chunk_size} onChange={(event) => setDraft({ ...draft, chunk_size: Number(event.target.value) })} /></Field>
+          <Field label="重叠长度"><input className="input" type="number" min={0} max={1000} value={draft.chunk_overlap} onChange={(event) => setDraft({ ...draft, chunk_overlap: Number(event.target.value) })} /></Field>
+        </div>
+      </div>
+      <div className="card pad row" style={{ marginTop: 16 }}>
+        <div className="grow"><strong>重建全部索引</strong><div className="faint">按每个文件各自的切块配置重新解析和向量化；构建中旧分块会被替换。</div></div>
+        <button className="btn" onClick={() => setRebuild(true)}><RefreshCw size={14} />重建</button>
+      </div>
+      <div className="card pad row" style={{ marginTop: 16, borderColor: '#fee4e2' }}>
+        <div className="grow"><strong>删除知识库</strong><div className="faint">删除 {kb.file_count} 个文件和全部索引，引用它的应用会失去该知识来源。</div></div>
+        <button className="btn danger" onClick={() => setRemoving(true)}><Trash2 size={14} />删除</button>
+      </div>
+      <ConfirmModal open={rebuild} title="重建全部索引" body={`将为 ${kb.file_count} 个文件重新执行解析、切块和向量化，可能产生模型调用费用。`} confirmText="开始重建" onClose={() => setRebuild(false)}
+        onConfirm={async () => { try { await apiFetch(`/knowledge-bases/${kb.id}/rebuild`, { method: 'POST' }); toast('已开始重建'); navigate(`/knowledge/${kb.id}`); } catch (caught) { toast(errorMessage(caught), 'error'); } }} />
+      <ConfirmModal open={removing} danger title="删除知识库" confirmText="永久删除" body={`确定删除「${kb.name}」？此操作不可恢复。`} onClose={() => setRemoving(false)}
+        onConfirm={async () => { try { await apiFetch(`/knowledge-bases/${kb.id}`, { method: 'DELETE' }); toast('知识库已删除'); navigate('/knowledge'); } catch (caught) { toast(errorMessage(caught), 'error'); } }} />
     </div>
   );
 }

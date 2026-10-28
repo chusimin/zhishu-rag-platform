@@ -17,7 +17,7 @@ const manifest: AppManifest = {
   guardrails: { blocked_topics: [], require_citations: false, refuse_without_evidence: false, human_handoff: false, max_output_chars: 8000 },
   memory: { enabled: false, max_turns: 10 },
   delivery: { channel: 'web', show_citations: false, allow_copy: true, allow_export: false },
-  agent: { max_steps: 8, require_confirmation_for_side_effects: true, show_tool_steps: true, long_term_memory: false },
+  agent: { max_steps: 8, require_confirmation_for_side_effects: true, show_tool_steps: true, long_term_memory: false, knowledge_mode: 'tool' },
 };
 
 afterEach(() => vi.unstubAllGlobals());

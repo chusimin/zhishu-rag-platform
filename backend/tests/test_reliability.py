@@ -216,10 +216,13 @@ def test_celery_autoretries_transient_import_failure(monkeypatch: pytest.MonkeyP
         async def dispose(self) -> None:
             return None
 
-    async def fail(job_id: str, session: AsyncSession) -> ImportJob:
+    flags: list[bool] = []
+
+    async def fail(job_id: str, session: AsyncSession, *, retry_transient: bool = True) -> ImportJob:
         nonlocal calls
         del job_id, session
         calls += 1
+        flags.append(retry_transient)
         raise TransientImportError("temporary connection failure")
 
     monkeypatch.setattr("app.tasks.build_engine", lambda: FakeEngine())
@@ -230,6 +233,8 @@ def test_celery_autoretries_transient_import_failure(monkeypatch: pytest.MonkeyP
 
     assert result.failed()
     assert calls == 4
+    # The final attempt must not stay "retry_pending" forever.
+    assert flags == [True, True, True, False]
 
 
 async def test_celery_dispatch_failure_marks_failed_and_single_file_retry_recovers(

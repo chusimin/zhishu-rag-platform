@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from uuid import UUID
 
 from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import InterfaceError, OperationalError
@@ -23,11 +24,14 @@ class TransientImportError(ConnectionError):
 
 async def ensure_vector_index(session: AsyncSession, knowledge_base_id: str, dimension: int) -> None:
     if session.bind and session.bind.dialect.name == "postgresql":
-        index_name = f"ix_chunks_{knowledge_base_id.replace('-', '')}_hnsw"
+        # PostgreSQL 的 DDL 不接受绑定参数，部分索引条件只能内联；先校验为 UUID 防止注入。
+        kb_uuid = str(UUID(knowledge_base_id))
+        dimension = int(dimension)
+        index_name = f"ix_chunks_{kb_uuid.replace('-', '')}_hnsw"
         await session.execute(text(
             f"CREATE INDEX IF NOT EXISTS {index_name} ON document_chunks USING hnsw "
-            f"((embedding::vector({dimension})) vector_cosine_ops) WHERE knowledge_base_id = :knowledge_base_id"
-        ), {"knowledge_base_id": knowledge_base_id})
+            f"((embedding::vector({dimension})) vector_cosine_ops) WHERE knowledge_base_id = '{kb_uuid}'"
+        ))
         await session.commit()
 
 

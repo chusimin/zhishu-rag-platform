@@ -256,3 +256,22 @@ async def test_trace_to_evaluation_set_to_release_gate_loop(client: AsyncClient)
     assert (await client.post(f"/api/v1/evaluation-sets/{suite_id}/run", headers=ADMIN)).json()["failed_count"] == 1
     assert (await client.post(f"/api/v1/fde/apps/{app_id}/publish", headers=ADMIN, json={})).status_code == 409
     assert (await client.delete(f"/api/v1/evaluation-sets/{suite_id}/cases/{failing.json()['id']}", headers=ADMIN)).status_code == 204
+
+
+async def test_single_file_can_be_rechunked_with_new_method(client: AsyncClient) -> None:
+    kb_id = await _knowledge_base(client)
+    files = (await client.get(f"/api/v1/knowledge-bases/{kb_id}/files", headers=ADMIN)).json()
+    file_id = files[0]["id"]
+    retried = await client.post(
+        f"/api/v1/knowledge-bases/{kb_id}/files/{file_id}/retry",
+        headers=ADMIN,
+        json={"chunk_config": {"method": "heading", "heading_level": 2, "chunk_size": 300, "chunk_overlap": 0}},
+    )
+    assert retried.status_code == 202, retried.text
+    assert retried.json()["status"] == "completed"
+    files = (await client.get(f"/api/v1/knowledge-bases/{kb_id}/files", headers=ADMIN)).json()
+    assert files[0]["chunk_config"]["method"] == "heading"
+    chunks = (await client.get(f"/api/v1/knowledge-bases/{kb_id}/chunks", headers=ADMIN, params={"file_id": file_id})).json()
+    assert {chunk["metadata_json"].get("chunk_method") for chunk in chunks} == {"heading"}
+    # Retry without a body keeps the stored per-file configuration.
+    assert (await client.post(f"/api/v1/knowledge-bases/{kb_id}/files/{file_id}/retry", headers=ADMIN)).status_code == 202

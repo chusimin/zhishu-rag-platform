@@ -16,8 +16,12 @@ from .worker import celery_app
     retry_backoff=True,
     retry_jitter=True,
     max_retries=3,
+    bind=True,
 )
-def process_import_job_task(job_id: str) -> str:
+def process_import_job_task(self, job_id: str) -> str:
+    # 最后一次尝试不再标记为可重试，失败时落到 failed，界面才能手动重试。
+    retry_transient = self.request.retries < self.max_retries
+
     async def run() -> str:
         # Celery prefork tasks each create their own asyncio loop. Reusing the
         # API process' global async engine across loops can attach asyncpg
@@ -26,7 +30,7 @@ def process_import_job_task(job_id: str) -> str:
         session_factory = async_sessionmaker(engine, expire_on_commit=False, autoflush=False)
         try:
             async with session_factory() as session:
-                job = await process_import_job(job_id, session)
+                job = await process_import_job(job_id, session, retry_transient=retry_transient)
                 return job.status
         finally:
             await engine.dispose()

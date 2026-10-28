@@ -5,11 +5,13 @@ import json
 from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
+from pydantic import BaseModel
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -648,15 +650,35 @@ async def delete_file(
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+class RechunkRequest(BaseModel):
+    """重新处理单个文件；传入 chunk_config 时按新的切块方式重建该文件的索引。"""
+
+    chunk_config: dict[str, Any] | None = None
+
+
 @router.post("/{knowledge_base_id}/files/{file_id}/retry", response_model=ImportJobResponse, status_code=status.HTTP_202_ACCEPTED)
 async def retry_file(
     knowledge_base_id: str,
     file_id: str,
+    payload: RechunkRequest | None = None,
     session: AsyncSession = Depends(get_session),
 ) -> ImportJobResponse:
     file = await session.get(KnowledgeFile, file_id)
     if file is None or file.knowledge_base_id != knowledge_base_id:
         raise HTTPException(status_code=404, detail="File not found")
+    if payload and payload.chunk_config is not None:
+        knowledge_base = await get_kb_or_404(session, knowledge_base_id)
+        try:
+            file.chunk_config = normalize_chunk_config(
+                payload.chunk_config,
+                default_method=knowledge_base.chunk_method,
+                default_chunk_size=knowledge_base.chunk_size,
+                default_chunk_overlap=knowledge_base.chunk_overlap,
+                default_parent_chunk_size=knowledge_base.parent_chunk_size,
+                default_child_chunk_size=knowledge_base.child_chunk_size,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
     active_job = await session.scalar(
         select(ImportJob).where(
             ImportJob.file_id == file.id,

@@ -1,203 +1,186 @@
-import { useEffect, useId, useRef, type ButtonHTMLAttributes, type PropsWithChildren, type ReactNode } from 'react';
-import { createPortal } from 'react-dom';
-import { AlertCircle, CheckCircle2, Info, X } from 'lucide-react';
+import {
+  AlertCircle, BookOpen, Bot, CheckCircle2, Headset, Info, LoaderCircle, Megaphone, MessageSquare, NotebookPen, PenLine,
+  ShieldCheck, Sparkles, TriangleAlert, X, type LucideIcon,
+} from 'lucide-react';
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type PropsWithChildren, type ReactNode } from 'react';
 
-type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger';
+/* -------- 应用图标：按模板 / 类型选择，保证同类应用在各页面一致 -------- */
 
-interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: ButtonVariant;
-  icon?: ReactNode;
-}
-
-export function Button({ variant = 'secondary', icon, className = '', children, ...props }: ButtonProps) {
-  return (
-    <button className={`button button--${variant} ${className}`.trim()} {...props}>
-      {icon}
-      {children}
-    </button>
-  );
-}
-
-export function IconButton({ label, children, className = '', ...props }: PropsWithChildren<ButtonHTMLAttributes<HTMLButtonElement> & { label: string }>) {
-  return (
-    <button className={`icon-button ${className}`.trim()} aria-label={label} title={label} {...props}>
-      {children}
-    </button>
-  );
-}
-
-export function Badge({ tone = 'neutral', children }: PropsWithChildren<{ tone?: 'neutral' | 'success' | 'warning' | 'error' | 'info' }>) {
-  const Icon = tone === 'success' ? CheckCircle2 : tone === 'warning' || tone === 'error' ? AlertCircle : tone === 'info' ? Info : null;
-  return (
-    <span className={`badge badge--${tone}`}>
-      {Icon ? <Icon size={13} aria-hidden="true" /> : null}
-      {children}
-    </span>
-  );
-}
-
-export function PageHeader({ title, description, eyebrow, actions }: { title: string; description: string; eyebrow?: string; actions?: ReactNode }) {
-  return (
-    <header className="page-header">
-      <div>
-        {eyebrow ? <div className="eyebrow">{eyebrow}</div> : null}
-        <h1>{title}</h1>
-        <p>{description}</p>
-      </div>
-      {actions ? <div className="page-actions">{actions}</div> : null}
-    </header>
-  );
-}
-
-export function StatCard({ label, value, detail, icon }: { label: string; value: string; detail: string; icon: ReactNode }) {
-  return (
-    <section className="card stat-card">
-      <div className="stat-icon">{icon}</div>
-      <div>
-        <span className="stat-label">{label}</span>
-        <strong>{value}</strong>
-        <small>{detail}</small>
-      </div>
-    </section>
-  );
-}
-
-type OverlayEntry = {
-  element: HTMLElement;
-  close: () => void;
+const TEMPLATE_ICON: Record<string, [LucideIcon, string]> = {
+  qa: [BookOpen, '#7a5af8'],
+  content: [PenLine, '#dd2590'],
+  report: [NotebookPen, '#3370ff'],
+  review: [ShieldCheck, '#f79009'],
+  customer_service: [Headset, '#12b76a'],
+  marketing: [Megaphone, '#dd2590'],
 };
 
-const overlayStack: OverlayEntry[] = [];
-let previousBodyOverflow = '';
-let rootWasInert = false;
-let rootAriaHidden: string | null = null;
-
-const focusableSelector = [
-  'a[href]',
-  'button:not([disabled])',
-  'input:not([disabled])',
-  'select:not([disabled])',
-  'textarea:not([disabled])',
-  '[tabindex]:not([tabindex="-1"])',
-].join(',');
-
-function visibleFocusableElements(container: HTMLElement) {
-  return Array.from(container.querySelectorAll<HTMLElement>(focusableSelector))
-    .filter((element) => element.getAttribute('aria-hidden') !== 'true' && element.getClientRects().length > 0);
+export function appVisual(templateKey: string | undefined, type?: string): [LucideIcon, string] {
+  if (templateKey && TEMPLATE_ICON[templateKey]) return TEMPLATE_ICON[templateKey];
+  return type === 'agent' ? [Bot, '#0e9384'] : [MessageSquare, '#3370ff'];
 }
 
-function useOverlayLifecycle(open: boolean, onClose: () => void, dialogRef: React.RefObject<HTMLElement>) {
-  const closeRef = useRef(onClose);
-  closeRef.current = onClose;
-
-  useEffect(() => {
-    if (!open || !dialogRef.current) return undefined;
-    const element = dialogRef.current;
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const entry: OverlayEntry = { element, close: () => closeRef.current() };
-    overlayStack.push(entry);
-    if (overlayStack.length === 1) {
-      previousBodyOverflow = document.body.style.overflow;
-      document.body.style.overflow = 'hidden';
-      const root = document.getElementById('root');
-      if (root) {
-        rootWasInert = root.hasAttribute('inert');
-        rootAriaHidden = root.getAttribute('aria-hidden');
-        root.setAttribute('inert', '');
-        root.setAttribute('aria-hidden', 'true');
-      }
-    }
-
-    const focusTimer = window.setTimeout(() => {
-      (visibleFocusableElements(element)[0] ?? element).focus();
-    }, 0);
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (overlayStack.at(-1) !== entry) return;
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        event.stopPropagation();
-        closeRef.current();
-        return;
-      }
-      if (event.key !== 'Tab') return;
-      const focusable = visibleFocusableElements(element);
-      if (!focusable.length) {
-        event.preventDefault();
-        element.focus();
-        return;
-      }
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (event.shiftKey && (document.activeElement === first || !element.contains(document.activeElement))) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && (document.activeElement === last || !element.contains(document.activeElement))) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown, true);
-    return () => {
-      window.clearTimeout(focusTimer);
-      document.removeEventListener('keydown', handleKeyDown, true);
-      const index = overlayStack.indexOf(entry);
-      if (index >= 0) overlayStack.splice(index, 1);
-      if (!overlayStack.length) {
-        document.body.style.overflow = previousBodyOverflow;
-        const root = document.getElementById('root');
-        if (root) {
-          if (!rootWasInert) root.removeAttribute('inert');
-          if (rootAriaHidden == null) root.removeAttribute('aria-hidden');
-          else root.setAttribute('aria-hidden', rootAriaHidden);
-        }
-        if (previousFocus?.isConnected) previousFocus.focus();
-      }
-    };
-  }, [open]);
+export function AppTile({ templateKey, type, size = 'md' }: { templateKey?: string; type?: string; size?: 'sm' | 'md' | 'lg' }) {
+  const [Icon, color] = appVisual(templateKey, type);
+  const px = size === 'sm' ? 15 : size === 'lg' ? 22 : 19;
+  return <span className={`avatar-tile ${size === 'md' ? '' : size}`} style={{ background: color }}><Icon size={px} aria-hidden="true" /></span>;
 }
 
-function Overlay({ kind, title, description, children, footer, onClose }: PropsWithChildren<{ kind: 'modal' | 'drawer'; title: string; description?: string; footer?: ReactNode; onClose: () => void }>) {
-  const titleId = useId();
-  const descriptionId = useId();
-  const dialogRef = useRef<HTMLElement>(null);
-  useOverlayLifecycle(true, onClose, dialogRef);
-  const closeFromBackdrop = (event: React.MouseEvent<HTMLDivElement>) => {
-    if (event.target === event.currentTarget && overlayStack.at(-1)?.element === dialogRef.current) onClose();
-  };
-  return createPortal(
-    <div className={`overlay ${kind === 'drawer' ? 'overlay--drawer' : ''}`} data-overlay-root role="presentation" onMouseDown={closeFromBackdrop}>
-      <section ref={dialogRef} tabIndex={-1} className={kind === 'drawer' ? 'drawer' : 'dialog'} role="dialog" aria-modal="true" aria-labelledby={titleId} aria-describedby={description ? descriptionId : undefined}>
-        <header className="overlay-header">
-          <div>
-            <h2 id={titleId}>{title}</h2>
-            {description ? <p id={descriptionId}>{description}</p> : null}
-          </div>
-          <IconButton className="overlay-close" label={kind === 'drawer' ? '关闭抽屉' : '关闭弹窗'} onClick={onClose}><X size={18} /></IconButton>
-        </header>
-        <div className="overlay-body">{children}</div>
-        {footer ? <footer className="overlay-footer">{footer}</footer> : null}
-      </section>
-    </div>,
-    document.body,
-  );
+export function Tag({ tone = '', children, title }: PropsWithChildren<{ tone?: string; title?: string }>) {
+  return <span className={`tag ${tone}`} title={title}>{children}</span>;
 }
 
-export function Modal(props: PropsWithChildren<{ open: boolean; title: string; description?: string; footer?: ReactNode; onClose: () => void }>) {
-  if (!props.open || typeof document === 'undefined') return null;
-  return <Overlay kind="modal" {...props} />;
+export function Switch({ on, onChange, label, disabled }: { on: boolean; onChange: (v: boolean) => void; label: string; disabled?: boolean }) {
+  return <button type="button" role="switch" aria-checked={on} aria-label={label} disabled={disabled} className={`switch ${on ? 'on' : ''}`} onClick={() => onChange(!on)} />;
 }
 
-export function Drawer(props: PropsWithChildren<{ open: boolean; title: string; description?: string; footer?: ReactNode; onClose: () => void }>) {
-  if (!props.open || typeof document === 'undefined') return null;
-  return <Overlay kind="drawer" {...props} />;
+export function Spinner({ size = 16 }: { size?: number }) {
+  return <LoaderCircle size={size} className="spin" aria-hidden="true" />;
 }
 
-export function Notice({ tone = 'info', title, children }: PropsWithChildren<{ tone?: 'info' | 'warning' | 'error' | 'success'; title: string }>) {
-  const Icon = tone === 'success' ? CheckCircle2 : tone === 'info' ? Info : AlertCircle;
+export function Notice({ tone = 'info', title, children, action }: PropsWithChildren<{ tone?: 'info' | 'warn' | 'error' | 'success'; title?: ReactNode; action?: ReactNode }>) {
+  const Icon = tone === 'error' ? AlertCircle : tone === 'warn' ? TriangleAlert : tone === 'success' ? CheckCircle2 : Info;
   return (
-    <div className={`notice notice--${tone}`}>
-      <Icon size={18} aria-hidden="true" />
-      <div><strong>{title}</strong><p>{children}</p></div>
+    <div className={`notice ${tone}`} role={tone === 'error' ? 'alert' : undefined}>
+      <Icon size={16} aria-hidden="true" />
+      <div className="grow">{title ? <strong style={{ display: 'block' }}>{title}</strong> : null}{children}</div>
+      {action}
     </div>
   );
+}
+
+export function Loading({ text = '加载中' }: { text?: string }) {
+  return <div className="empty" aria-busy="true"><Spinner size={22} /><span>{text}</span></div>;
+}
+
+/* -------- Toast -------- */
+
+type ToastTone = 'info' | 'error';
+const ToastCtx = createContext<(text: string, tone?: ToastTone) => void>(() => undefined);
+
+export function ToastProvider({ children }: PropsWithChildren) {
+  const [items, setItems] = useState<{ id: number; text: string; tone: ToastTone }[]>([]);
+  const show = useCallback((text: string, tone: ToastTone = 'info') => {
+    const id = Date.now() + Math.random();
+    setItems((list) => [...list, { id, text, tone }]);
+    window.setTimeout(() => setItems((list) => list.filter((i) => i.id !== id)), tone === 'error' ? 5000 : 2600);
+  }, []);
+  return (
+    <ToastCtx.Provider value={show}>
+      {children}
+      <div className="toast-wrap" aria-live="polite">{items.map((i) => <div className={`toast ${i.tone === 'error' ? 'toast-error' : ''}`} key={i.id}>{i.tone === 'error' ? <AlertCircle size={15} /> : null}{i.text}</div>)}</div>
+    </ToastCtx.Provider>
+  );
+}
+
+export const useToast = () => useContext(ToastCtx);
+
+/* -------- Modal / Drawer -------- */
+
+function useEscape(open: boolean, onClose: () => void) {
+  useEffect(() => {
+    if (!open) return undefined;
+    const handler = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [open, onClose]);
+}
+
+export function Modal({ open, title, onClose, children, footer, wide, icon }: PropsWithChildren<{ open: boolean; title: string; onClose: () => void; footer?: ReactNode; wide?: boolean; icon?: ReactNode }>) {
+  useEscape(open, onClose);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => { if (open) ref.current?.focus(); }, [open]);
+  if (!open) return null;
+  return (
+    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} ref={ref}>
+        <div className="modal-head">{icon}<h3>{title}</h3><button className="btn ghost sm icon" aria-label="关闭" onClick={onClose}><X size={16} /></button></div>
+        <div className="modal-body">{children}</div>
+        {footer ? <div className="modal-foot">{footer}</div> : null}
+      </div>
+    </div>
+  );
+}
+
+export function Drawer({ open, title, onClose, children, footer, wide }: PropsWithChildren<{ open: boolean; title: ReactNode; onClose: () => void; footer?: ReactNode; wide?: boolean }>) {
+  useEscape(open, onClose);
+  if (!open) return null;
+  return (
+    <>
+      <div className="overlay" style={{ background: 'rgba(16,24,40,.18)' }} onMouseDown={onClose} />
+      <aside className="drawer" role="dialog" aria-modal="true" style={wide ? { width: 'min(880px, 100vw)' } : undefined}>
+        <div className="modal-head" style={{ borderBottom: '1px solid var(--border)', paddingBottom: 14 }}><h3>{title}</h3><button className="btn ghost sm icon" aria-label="关闭" onClick={onClose}><X size={16} /></button></div>
+        <div className="modal-body" style={{ flex: 1, paddingTop: 16 }}>{children}</div>
+        {footer ? <div className="modal-foot">{footer}</div> : null}
+      </aside>
+    </>
+  );
+}
+
+export function Field({ label, required, hint, children }: PropsWithChildren<{ label: ReactNode; required?: boolean; hint?: ReactNode }>) {
+  return (
+    <div className="form-item">
+      <div className="field-label">{label}{required ? <span className="req">*</span> : null}{hint ? <span className="hint">{hint}</span> : null}</div>
+      {children}
+    </div>
+  );
+}
+
+export function Slider({ value, min, max, step = 1, onChange, suffix, label }: { value: number; min: number; max: number; step?: number; onChange: (v: number) => void; suffix?: string; label?: string }) {
+  return (
+    <div className="slider-row">
+      <input className="range" type="range" aria-label={label} min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} />
+      <div className="row" style={{ flex: 'none' }}>
+        <input className="input sm" type="number" aria-label={label} min={min} max={max} step={step} value={value} onChange={(e) => onChange(Number(e.target.value))} />
+        {suffix ? <span className="faint">{suffix}</span> : null}
+      </div>
+    </div>
+  );
+}
+
+export function Empty({ icon, title, desc, action }: { icon?: ReactNode; title: string; desc?: string; action?: ReactNode }) {
+  return <div className="empty">{icon ?? <Sparkles size={24} />}<strong style={{ color: 'var(--text-1)' }}>{title}</strong>{desc ? <span>{desc}</span> : null}{action}</div>;
+}
+
+export function ConfirmModal({ open, title, body, confirmText = '确认', danger, onConfirm, onClose }: { open: boolean; title: string; body: ReactNode; confirmText?: string; danger?: boolean; onConfirm: () => void | Promise<void>; onClose: () => void }) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <Modal open={open} title={title} onClose={onClose} footer={<><button className="btn" onClick={onClose}>取消</button><button className={`btn ${danger ? 'danger-solid' : 'primary'}`} disabled={busy} onClick={async () => { setBusy(true); try { await onConfirm(); onClose(); } finally { setBusy(false); } }}>{busy ? <Spinner /> : null}{confirmText}</button></>}>
+      <div className="muted">{body}</div>
+    </Modal>
+  );
+}
+
+/* -------- 格式化 -------- */
+
+export function formatTime(value: string | null | undefined) {
+  if (!value) return '—';
+  const date = new Date(value);
+  const now = new Date();
+  const sameDay = date.toDateString() === now.toDateString();
+  return new Intl.DateTimeFormat('zh-CN', sameDay ? { hour: '2-digit', minute: '2-digit', second: '2-digit' } : { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).format(date);
+}
+
+export function formatDuration(ms: number | null | undefined) {
+  if (ms == null) return '—';
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(2)}s`;
+  return `${Math.floor(ms / 60000)}m ${Math.round((ms % 60000) / 1000)}s`;
+}
+
+export function formatTokens(n: number | null | undefined) {
+  if (n == null) return '—';
+  return n >= 1000000 ? `${(n / 1000000).toFixed(2)}M` : n >= 10000 ? `${(n / 1000).toFixed(1)}K` : n.toLocaleString();
+}
+
+export function formatCost(value: number | null | undefined, currency = 'USD') {
+  if (value == null) return '未计价';
+  const symbol = currency === 'CNY' ? '¥' : '$';
+  return `${symbol}${value < 0.01 ? value.toFixed(5) : value < 10 ? value.toFixed(4) : value.toFixed(2)}`;
+}
+
+export function formatBytes(size: number) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 / 1024).toFixed(1)} MB`;
 }

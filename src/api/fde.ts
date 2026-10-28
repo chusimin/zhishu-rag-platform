@@ -29,7 +29,7 @@ export type AppManifest = {
   guardrails: { blocked_topics: string[]; require_citations: boolean; refuse_without_evidence: boolean; human_handoff: boolean; max_output_chars: number };
   memory: { enabled: boolean; max_turns: number };
   delivery: { channel: 'web' | 'api' | 'both'; show_citations: boolean; allow_copy: boolean; allow_export: boolean };
-  agent: { max_steps: number; require_confirmation_for_side_effects: boolean; show_tool_steps: boolean; long_term_memory: boolean };
+  agent: { max_steps: number; require_confirmation_for_side_effects: boolean; show_tool_steps: boolean; long_term_memory: boolean; knowledge_mode: 'tool' | 'always' };
 };
 
 export type AppTemplate = {
@@ -64,15 +64,18 @@ export type FDEApp = {
   conversation_count?: number;
   updated_at: string;
 };
+export type Citation = { chunk_id: string; knowledge_base_id?: string; filename: string; title: string; page_number: number | null; content: string; score: number };
 export type RunResult = {
   content: string;
-  citations: Array<{ chunk_id: string; filename: string; title: string; page_number: number | null; content: string; score: number }>;
+  citations: Citation[];
   tokens: { input: number | null; output: number | null; total: number | null };
   duration_ms: number;
   simulated: boolean;
   output_json: unknown;
   handoff: boolean;
-  agent_steps: Array<{ step: number; tool: string; arguments: Record<string, unknown>; status: string; result: string }>;
+  agent_steps: Array<{ step: number; tool: string; kind?: 'tool' | 'retrieval' | 'handoff'; arguments: Record<string, unknown>; status: string; result: string; duration_ms?: number }>;
+  model?: { id: string; name: string; display_name: string; provider: string; simulated: boolean };
+  trace_id: string;
   conversation_id: string;
   message_id: string;
   app_version_id: string | null;

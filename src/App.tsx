@@ -1,87 +1,48 @@
-import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { useEffect, useState, type PropsWithChildren } from 'react';
-import { AppShell, canAccess } from './components/AppShell';
-import { ToastProvider } from './components/Toast';
-import { AgentAccessPage } from './pages/AgentAccessPage';
-import { DashboardPage } from './pages/DashboardPage';
-import { AppConfigPage } from './pages/AppConfigPage';
+import type { PropsWithChildren } from 'react';
+import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
+import { useAuth } from './auth';
+import { canVisit, Shell } from './components/Shell';
+import { Loading } from './components/ui';
+import { AppEditorPage } from './pages/AppEditorPage';
 import { AppsPage } from './pages/AppsPage';
-import { ChatPage } from './pages/ChatPage';
-import { ChunksPage } from './pages/ChunksPage';
-import { KnowledgeDetailPage } from './pages/KnowledgeDetailPage';
-import { KnowledgePage } from './pages/KnowledgePage';
-import { ImportWizardPage } from './pages/ImportWizardPage';
-import { LogsPage } from './pages/LogsPage';
+import { ChatRunPage } from './pages/ChatRunPage';
 import { EvaluationSetsPage } from './pages/EvaluationSetsPage';
+import { ImportWizardPage } from './pages/ImportWizardPage';
+import { KnowledgeDetailPage } from './pages/KnowledgeDetailPage';
+import { KnowledgeListPage } from './pages/KnowledgeListPage';
 import { LoginPage } from './pages/LoginPage';
-import { FDEStudioPage } from './pages/FDEStudioPage';
-import { PortalPage, SharedPortalPage } from './pages/PortalPage';
-import { ModelsPage } from './pages/ModelsPage';
-import { RetrievalTestPage } from './pages/RetrievalTestPage';
-import { RolePage } from './pages/RolePage';
-import { ToolsPage } from './pages/ToolsPage';
+import { ObservabilityPage } from './pages/ObservabilityPage';
 import { SettingsPage } from './pages/SettingsPage';
-import type { Role } from './types';
+import { SharePage } from './pages/SharePage';
+import { ToolsPage } from './pages/ToolsPage';
+import { WorkbenchPage } from './pages/WorkbenchPage';
 
-const roleStorageKey = 'knowledge-hub-demo-role';
-
-function loadRole(): Role | null {
-  const value = window.localStorage.getItem(roleStorageKey);
-  return value === 'admin' || value === 'manager' || value === 'user' ? value : null;
-}
-
-function ProtectedShell({ role, onRoleChange, children }: PropsWithChildren<{ role: Role | null; onRoleChange: (role: Role) => void }>) {
+function Protected({ children }: PropsWithChildren) {
+  const { me, loading } = useAuth();
   const location = useLocation();
-  if (!role) return <Navigate to="/role" replace state={{ from: location.pathname }} />;
-  if (!canAccess(role, location.pathname)) return <Navigate to="/dashboard" replace />;
-  return <AppShell role={role} onRoleChange={onRoleChange}>{children}</AppShell>;
+  if (loading) return <Loading text="正在验证登录状态" />;
+  if (!me) return <Navigate to="/login" replace state={{ from: location.pathname + location.search }} />;
+  if (!canVisit(me.role, location.pathname)) return <Navigate to="/workbench" replace />;
+  return <Shell>{children}</Shell>;
 }
 
 export default function App() {
-  const [role, setRole] = useState<Role | null>(() => loadRole());
-  const navigate = useNavigate();
-
-  useEffect(() => {
-    if (role) window.localStorage.setItem(roleStorageKey, role);
-  }, [role]);
-
-  const changeRole = (nextRole: Role) => {
-    window.localStorage.setItem(roleStorageKey, nextRole);
-    setRole(nextRole);
-  };
-
-  const chooseRole = (nextRole: Role) => {
-    changeRole(nextRole);
-    navigate('/dashboard');
-  };
-
   return (
-    <ToastProvider>
-      <Routes>
-        <Route path="/role" element={<RolePage currentRole={role} onSelect={chooseRole} />} />
-        <Route path="/login" element={<LoginPage onLogin={changeRole} />} />
-        <Route path="/portal" element={role ? <PortalPage /> : <Navigate to="/login" replace />} />
-        <Route path="/portal/apps/:id" element={role ? <PortalPage /> : <Navigate to="/login" replace />} />
-        <Route path="/share/:token" element={<SharedPortalPage />} />
-        <Route path="/studio" element={<ProtectedShell role={role} onRoleChange={changeRole}><FDEStudioPage /></ProtectedShell>} />
-        <Route path="/agent" element={<ProtectedShell role={role} onRoleChange={changeRole}><AgentAccessPage /></ProtectedShell>} />
-        <Route path="/dashboard" element={<ProtectedShell role={role} onRoleChange={changeRole}><DashboardPage role={role!} /></ProtectedShell>} />
-        <Route path="/models" element={<ProtectedShell role={role} onRoleChange={changeRole}><ModelsPage /></ProtectedShell>} />
-        <Route path="/tools" element={<ProtectedShell role={role} onRoleChange={changeRole}><ToolsPage /></ProtectedShell>} />
-        <Route path="/knowledge" element={<ProtectedShell role={role} onRoleChange={changeRole}><KnowledgePage /></ProtectedShell>} />
-        <Route path="/knowledge/:id/import" element={<ProtectedShell role={role} onRoleChange={changeRole}><ImportWizardPage /></ProtectedShell>} />
-        <Route path="/knowledge/:id/chunks" element={<ProtectedShell role={role} onRoleChange={changeRole}><ChunksPage /></ProtectedShell>} />
-        <Route path="/knowledge/:id/test" element={<ProtectedShell role={role} onRoleChange={changeRole}><RetrievalTestPage /></ProtectedShell>} />
-        <Route path="/knowledge/:id" element={<ProtectedShell role={role} onRoleChange={changeRole}><KnowledgeDetailPage /></ProtectedShell>} />
-        <Route path="/apps" element={<ProtectedShell role={role} onRoleChange={changeRole}><AppsPage /></ProtectedShell>} />
-        <Route path="/apps/:id/config" element={<ProtectedShell role={role} onRoleChange={changeRole}><AppConfigPage /></ProtectedShell>} />
-        <Route path="/chat" element={<ProtectedShell role={role} onRoleChange={changeRole}><ChatPage /></ProtectedShell>} />
-        <Route path="/logs" element={<ProtectedShell role={role} onRoleChange={changeRole}><LogsPage /></ProtectedShell>} />
-        <Route path="/evaluation-sets" element={<ProtectedShell role={role} onRoleChange={changeRole}><EvaluationSetsPage /></ProtectedShell>} />
-        <Route path="/settings" element={<ProtectedShell role={role} onRoleChange={changeRole}><SettingsPage /></ProtectedShell>} />
-        <Route path="/" element={<Navigate to={role ? '/dashboard' : '/role'} replace />} />
-        <Route path="*" element={<Navigate to={role ? '/dashboard' : '/role'} replace />} />
-      </Routes>
-    </ToastProvider>
+    <Routes>
+      <Route path="/login" element={<LoginPage />} />
+      <Route path="/share/:token" element={<SharePage />} />
+      <Route path="/workbench" element={<Protected><WorkbenchPage /></Protected>} />
+      <Route path="/chat/:appId" element={<Protected><ChatRunPage /></Protected>} />
+      <Route path="/apps" element={<Protected><AppsPage /></Protected>} />
+      <Route path="/apps/:appId" element={<Protected><AppEditorPage /></Protected>} />
+      <Route path="/knowledge" element={<Protected><KnowledgeListPage /></Protected>} />
+      <Route path="/knowledge/:kbId/import" element={<Protected><ImportWizardPage /></Protected>} />
+      <Route path="/knowledge/:kbId/*" element={<Protected><KnowledgeDetailPage /></Protected>} />
+      <Route path="/observability" element={<Protected><ObservabilityPage /></Protected>} />
+      <Route path="/evaluation-sets" element={<Protected><EvaluationSetsPage /></Protected>} />
+      <Route path="/tools" element={<Protected><ToolsPage /></Protected>} />
+      <Route path="/settings" element={<Protected><SettingsPage /></Protected>} />
+      <Route path="*" element={<Navigate to="/workbench" replace />} />
+    </Routes>
   );
 }
