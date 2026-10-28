@@ -257,7 +257,7 @@ export function AppConfigForm({ manifest, patch, templates, models, knowledge, t
         <Field label="引用上限" hint="字符"><Slider label="引用上限" value={retrieval.max_context_chars} min={1000} max={50000} step={1000} onChange={(value) => patch(withRetrievalConfig(manifest, { max_context_chars: value }))} /></Field>
       </Modal>
 
-      <Modal open={toolOpen} title="添加工具" onClose={() => setToolOpen(false)} wide footer={<><Link className="btn" to="/tools">管理工具库</Link><button className="btn primary" onClick={() => setToolOpen(false)}>完成</button></>}>
+      <Modal open={toolOpen} title="添加工具" onClose={() => setToolOpen(false)} wide footer={<><Link className="btn" to="/tools?tab=tools">管理工具库</Link><button className="btn primary" onClick={() => setToolOpen(false)}>完成</button></>}>
         {!tools.length ? <p className="faint">工具库为空。</p> : null}
         <div className="grid c2" style={{ gap: 10 }}>
           {tools.map((tool) => {
