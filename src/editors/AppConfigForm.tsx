@@ -42,14 +42,15 @@ function toolRefName(tool: ApiToolConfig) {
 
 const FIELD_TYPES: Record<InputField['type'], string> = { text: '单行文本', textarea: '多行文本', number: '数字', select: '下拉选择', boolean: '开关' };
 
-function FieldEditor({ fields, onChange }: { fields: InputField[]; onChange: (fields: InputField[]) => void }) {
+function FieldEditor({ fields, onChange }: { fields: InputField[]; onChange: (fields: InputField[], renamed?: { from: string; to: string }) => void }) {
   const [editing, setEditing] = useState<{ index: number; field: InputField } | null>(null);
   const keyValid = editing ? /^[a-z][a-z0-9_]*$/.test(editing.field.key) && !fields.some((item, index) => item.key === editing.field.key && index !== editing.index) : true;
   const save = () => {
     if (!editing) return;
     const next = [...fields];
     if (editing.index < 0) next.push(editing.field); else next[editing.index] = editing.field;
-    onChange(next);
+    const previous = editing.index >= 0 ? fields[editing.index].key : null;
+    onChange(next, previous && previous !== editing.field.key ? { from: previous, to: editing.field.key } : undefined);
     setEditing(null);
   };
   return (
@@ -76,6 +77,8 @@ function FieldEditor({ fields, onChange }: { fields: InputField[]; onChange: (fi
             <Field label="必填"><Switch on={editing.field.required} onChange={(value) => setEditing({ ...editing, field: { ...editing.field, required: value } })} label="必填" /></Field>
           </div>
           {!keyValid ? <Notice tone="error">变量名需小写字母开头、仅含小写字母数字下划线，且不能重复。</Notice> : null}
+          <Field label="说明" hint="显示在输入框旁"><input className="input" value={editing.field.description ?? ''} onChange={(event) => setEditing({ ...editing, field: { ...editing.field, description: event.target.value } })} /></Field>
+          {editing.index >= 0 && editing.field.key !== fields[editing.index].key ? <Notice tone="info">提示词中的 {`{{${fields[editing.index].key}}}`} 会同步改为 {`{{${editing.field.key}}}`}。</Notice> : null}
           <Field label="占位提示"><input className="input" value={editing.field.placeholder ?? ''} onChange={(event) => setEditing({ ...editing, field: { ...editing.field, placeholder: event.target.value } })} /></Field>
           {editing.field.type === 'select' ? <Field label="选项" required><ListEditor items={editing.field.options} placeholder="添加选项" onChange={(options) => setEditing({ ...editing, field: { ...editing.field, options } })} /></Field> : null}
         </> : null}
@@ -131,7 +134,7 @@ export function AppConfigForm({ manifest, patch, templates, models, knowledge, t
         <Field label="对话模型" required hint={isAgent ? '需支持工具调用' : undefined}>
           <select className="select" value={manifest.llm_model_id ?? ''} onChange={(event) => patch({ llm_model_id: event.target.value || null })}>
             <option value="">请选择</option>
-            {llms.map((item) => <option key={item.id} value={item.id}>{item.display_name} · {item.provider}{item.provider === 'mock' ? '（测试替身）' : ''}</option>)}
+            {llms.map((item) => <option key={item.id} value={item.id}>{item.display_name} · {item.provider}{item.provider === 'mock' ? '（测试替身）' : ''}{item.connection_status === 'error' ? '（连接异常）' : ''}</option>)}
           </select>
         </Field>
         <div className="form-grid">
@@ -206,7 +209,10 @@ export function AppConfigForm({ manifest, patch, templates, models, knowledge, t
         </Section>
       ) : (
         <Section icon={<FormInput size={16} />} title="表单输入" extra={<Tag>{manifest.input_fields.length} 个字段</Tag>}>
-          <FieldEditor fields={manifest.input_fields} onChange={(fields) => patch({ input_fields: fields })} />
+          <FieldEditor fields={manifest.input_fields} onChange={(fields, renamed) => patch({
+            input_fields: fields,
+            ...(renamed ? { system_prompt: manifest.system_prompt.split(`{{${renamed.from}}}`).join(`{{${renamed.to}}}`) } : {}),
+          })} />
         </Section>
       )}
 

@@ -1,10 +1,11 @@
 import { Archive, ArchiveRestore, Bot, Copy, LayoutTemplate, MessageSquare, MoreHorizontal, Play, Plus, Search, Sparkles, Trash2, Wand2, Workflow } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { apiFetch, errorMessage, type ApiModelOption } from '../api/client';
 import { fdeApi, type AppManifest, type AppTemplate, type FDEApp } from '../api/fde';
 import { AppTile, ConfirmModal, Empty, Field, Loading, Modal, Notice, Spinner, Tag, formatTime, useToast } from '../components/ui';
-import { appStatus, defaultLlm, manifestFromTemplate, sceneOf, SCENES, TYPE_META, type AppType } from '../lib/apps';
+import { useAuth } from '../auth';
+import { appStatus, blankManifest, defaultLlm, manifestFromTemplate, sceneOf, SCENES, TYPE_META, type AppType } from '../lib/apps';
 
 const TYPE_ICON: Record<AppType | 'chatflow', ReactNode> = {
   simple: <MessageSquare size={18} />,
@@ -22,7 +23,14 @@ function CreateModal({ open, onClose, templates, options }: { open: boolean; onC
   const [brief, setBrief] = useState('');
   const [plan, setPlan] = useState<AppManifest | null>(null);
   const [busy, setBusy] = useState(false);
+  const { me } = useAuth();
   const llm = defaultLlm(options);
+
+  // 每次打开都从干净状态开始
+  useEffect(() => {
+    if (!open) return;
+    setMode('template'); setType('agent'); setTemplateKey('customer_service'); setName(''); setBrief(''); setPlan(null);
+  }, [open]);
 
   const create = async (manifest: AppManifest) => {
     setBusy(true);
@@ -54,7 +62,10 @@ function CreateModal({ open, onClose, templates, options }: { open: boolean; onC
 
   const footer = mode === 'ai'
     ? <><button className="btn" onClick={onClose}>取消</button>{plan ? <button className="btn primary" disabled={busy} onClick={() => void create(plan)}>{busy ? <Spinner /> : null}按此方案创建</button> : <button className="btn primary" disabled={busy || brief.trim().length < 8} onClick={() => void design()}>{busy ? <Spinner /> : <Wand2 size={15} />}生成方案</button>}</>
-    : <><button className="btn" onClick={onClose}>取消</button><button className="btn primary" disabled={busy || !template} onClick={() => template && void create(manifestFromTemplate(template, type, llm?.id ?? null, name || (mode === 'blank' ? `未命名${TYPE_META[type].name}` : undefined)))}>{busy ? <Spinner /> : null}创建</button></>;
+    : <><button className="btn" onClick={onClose}>取消</button><button className="btn primary" disabled={busy || !template} onClick={() => {
+      const manifest = mode === 'blank' ? blankManifest(templates, type, llm?.id ?? null, name.trim() || `未命名${TYPE_META[type].name}`) : template ? manifestFromTemplate(template, type, llm?.id ?? null, name || undefined) : null;
+      if (manifest) void create(manifest);
+    }}>{busy ? <Spinner /> : null}创建</button></>;
 
   return (
     <Modal open={open} title="新建应用" onClose={onClose} wide footer={footer}>
@@ -63,12 +74,12 @@ function CreateModal({ open, onClose, templates, options }: { open: boolean; onC
         <button className={mode === 'blank' ? 'active' : ''} onClick={() => setMode('blank')}><Plus size={14} />空白应用</button>
         <button className={mode === 'ai' ? 'active' : ''} onClick={() => { setMode('ai'); setPlan(null); }}><Sparkles size={14} />AI 帮我搭建</button>
       </div>
-      {!llm ? <div style={{ marginBottom: 12 }}><Notice tone="warn" title="还没有可用的对话模型">请先在「工具 → 模型」接入 LLM，应用创建后也可再选择。</Notice></div> : null}
+      {!llm ? <div style={{ marginBottom: 12 }}><Notice tone="warn" title="还没有可用的对话模型" action={me?.role === 'admin' ? <Link className="btn sm" to="/tools?tab=models">去接入</Link> : undefined}>{me?.role === 'admin' ? '先接入一个 LLM，应用创建后也可再选择。' : '请联系管理员在「工具 → 模型」接入 LLM，应用创建后也可再选择。'}</Notice></div> : null}
 
       <Field label="应用类型" required>
         <div className="grid c3" style={{ gap: 10 }}>
           {(['simple', 'agent', 'chatflow'] as const).map((key) => (
-            <button key={key} type="button" disabled={key === 'chatflow'} className={`method-card ${type === key ? 'active' : ''} ${key === 'chatflow' ? 'coming-soon' : ''}`} style={{ flexDirection: 'column' }} onClick={() => key !== 'chatflow' && setType(key)}>
+            <button key={key} type="button" disabled={key === 'chatflow'} className={`method-card ${type === key ? 'active' : ''} ${key === 'chatflow' ? 'coming-soon' : ''}`} style={{ flexDirection: 'column' }} onClick={() => { if (key !== 'chatflow') { setType(key); setPlan(null); } }}>
               <div className="row" style={{ color: 'var(--primary)' }}>{TYPE_ICON[key]}<h4 style={{ color: 'var(--text-1)' }}>{TYPE_META[key].name}</h4>{key === 'chatflow' ? <Tag>即将上线</Tag> : null}</div>
               <p>{TYPE_META[key].desc}</p>
               <p style={{ marginTop: 4, color: 'var(--text-2)' }}>例：{TYPE_META[key].examples}</p>

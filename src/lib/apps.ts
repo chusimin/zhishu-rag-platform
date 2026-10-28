@@ -75,3 +75,18 @@ export function withRetrievalConfig(manifest: AppManifest, patch: Partial<Return
   const others = manifest.tools.filter((item) => item.name !== 'knowledge_retrieval');
   return { ...manifest, tools: [...others, { name: 'knowledge_retrieval', enabled: true, config: { ...current, ...patch } }] };
 }
+
+/** 空白应用：沿用通用模板的结构，但不带任何预置提示词、表单和工具。 */
+export function blankManifest(templates: AppTemplate[], type: AppType, llmId: string | null, name: string): AppManifest | null {
+  const base = templates.find((item) => !item.knowledge_bases.required) ?? templates[0];
+  if (!base) return null;
+  const manifest = manifestFromTemplate(base, type, llmId, name);
+  return {
+    ...manifest,
+    description: '',
+    system_prompt: type === 'agent' ? '你是一个业务助手。说明你的职责、可以使用的知识和工具，以及何时需要转人工。' : '你是一个业务助手。请根据用户输入完成任务。',
+    input_fields: [],
+    tools: [],
+    guardrails: { ...manifest.guardrails, human_handoff: false, blocked_topics: [] },
+  };
+}

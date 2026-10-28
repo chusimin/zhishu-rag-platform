@@ -139,7 +139,7 @@ export function EvalTab({ app }: { app: FDEApp }) {
               <tr key={set.id}>
                 <td><Link to={`/evaluation-sets?set=${set.id}`} style={{ fontWeight: 500 }}>{set.name}</Link><div className="faint">{set.description}</div></td>
                 <td>{set.case_count}{set.needs_standard_count ? <Tag tone="orange">{set.needs_standard_count} 待补标准</Tag> : null}</td>
-                <td>{run ? (run.failed_count ? <Tag tone="red"><XCircle size={12} />{run.passed_count}/{run.passed_count + run.failed_count} 通过</Tag> : <Tag tone="green"><CheckCircle2 size={12} />全部通过</Tag>) : <span className="faint">未运行</span>}{run ? <div className="faint">{formatTime(run.created_at)}</div> : null}</td>
+                <td>{run ? (run.failed_count ? <Tag tone="red"><XCircle size={12} />{run.passed_count}/{run.passed_count + run.failed_count} 通过</Tag> : <Tag tone="green"><CheckCircle2 size={12} />全部通过</Tag>) : <span className="faint">未运行</span>}{run?.matches_draft === false ? <Tag tone="orange">草稿已改动，需重跑</Tag> : null}{run ? <div className="faint">{formatTime(run.created_at)}</div> : null}</td>
                 <td><Switch on={set.is_release_gate} label="发布门禁" onChange={async (value) => { try { await evalApi.update(set.id, { is_release_gate: value }); toast(value ? '已设为发布门禁' : '已取消门禁'); void load(); } catch (caught) { toast(errorMessage(caught), 'error'); } }} /></td>
                 <td><button className="btn sm" disabled={running === set.id || !set.case_count || set.needs_standard_count > 0} title={set.needs_standard_count ? '有 Case 待补标准' : undefined} onClick={() => void runSet(set)}>{running === set.id ? <Spinner size={12} /> : <Play size={13} />}运行</button></td>
               </tr>
@@ -147,7 +147,7 @@ export function EvalTab({ app }: { app: FDEApp }) {
           })}</tbody>
         </table>
       )}
-      <Modal open={creating} title="新建评测集" onClose={() => setCreating(false)} footer={<><button className="btn" onClick={() => setCreating(false)}>取消</button><button className="btn primary" disabled={!name.trim()} onClick={async () => {
+      <Modal open={creating} title="新建评测集" onClose={() => { setCreating(false); setName(''); }} footer={<><button className="btn" onClick={() => { setCreating(false); setName(''); }}>取消</button><button className="btn primary" disabled={!name.trim()} onClick={async () => {
         try { const set = await evalApi.create({ app_id: app.id, name: name.trim() }); setCreating(false); setName(''); navigate(`/evaluation-sets?set=${set.id}`); } catch (caught) { toast(errorMessage(caught), 'error'); }
       }}>创建</button></>}>
         <Field label="名称" required><input className="input" autoFocus value={name} placeholder="例如：售后政策回归集" onChange={(event) => setName(event.target.value)} /></Field>
@@ -210,7 +210,7 @@ export function VersionsTab({ app, onChanged }: { app: FDEApp; onChanged: () => 
                 <Tag tone={live ? 'green' : ''}>v{version.version}</Tag>
                 <div className="grow"><div>{version.release_notes || <span className="faint">无版本说明</span>}</div><div className="faint">{formatTime(version.created_at)} · {version.manifest.type === 'agent' ? 'Agent' : '简易应用'} · {version.manifest.knowledge_base_ids.length} 个知识库 · {version.manifest.tools.filter((tool) => tool.tool_id).length} 个工具</div></div>
                 <button className="btn sm ghost" onClick={() => setViewing(version)}>查看配置</button>
-                {live ? <Tag tone="green">线上</Tag> : <button className="btn sm" onClick={() => setRolling(version)}><RotateCcw size={13} />{app.published_version_id ? '回滚到此版本' : '发布此版本'}</button>}
+                {live ? <Tag tone="green">线上</Tag> : <button className="btn sm" onClick={() => setRolling(version)}><RotateCcw size={13} />{version.id === app.published_version_id ? '重新上线' : app.published_version_id ? '回滚到此版本' : '发布此版本'}</button>}
               </div>
             );
           })}
@@ -219,7 +219,7 @@ export function VersionsTab({ app, onChanged }: { app: FDEApp; onChanged: () => 
       <Drawer open={!!viewing} wide title={`v${viewing?.version ?? ''} 配置`} onClose={() => setViewing(null)}>
         {viewing ? <div className="json-view" style={{ maxHeight: 'none' }}>{JSON.stringify(viewing.manifest, null, 2)}</div> : null}
       </Drawer>
-      <ConfirmModal open={!!rolling} title={`切换到 v${rolling?.version ?? ''}`} confirmText="确认切换" body="所有渠道将立即使用该版本；当前草稿不受影响。" onClose={() => setRolling(null)}
+      <ConfirmModal open={!!rolling} title={`切换到 v${rolling?.version ?? ''}`} confirmText="确认切换" body="所有渠道将立即使用该版本；当前草稿不受影响。回滚不受发布门禁限制。" onClose={() => setRolling(null)}
         onConfirm={async () => { if (!rolling) return; try { await fdeApi.rollback(app.id, rolling.id); toast(`线上已切换到 v${rolling.version}`); onChanged(); } catch (caught) { toast(errorMessage(caught), 'error'); } }} />
     </div>
   );

@@ -1,8 +1,9 @@
 import { BookText, Database, Plus, Search } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { apiFetch, errorMessage, type ApiKnowledgeBase, type ApiModelOption } from '../api/client';
 import { fdeApi, type FDEApp } from '../api/fde';
+import { useAuth } from '../auth';
 import { Empty, Field, Loading, Modal, Notice, Spinner, Tag, formatTime, useToast } from '../components/ui';
 import { CHUNK_METHODS, METHOD_LABEL, modelsOf, type ChunkMethod } from '../lib/knowledge';
 
@@ -18,6 +19,7 @@ export function KnowledgeListPage() {
   const [q, setQ] = useState('');
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
+  const { me } = useAuth();
   const [form, setForm] = useState({ name: '', description: '', embedding_model_id: '', rerank_model_id: '', ocr_model_id: '', llm_id: '', chunk_method: 'recursive' as ChunkMethod });
 
   useEffect(() => {
@@ -118,7 +120,7 @@ export function KnowledgeListPage() {
             {CHUNK_METHODS.filter((item) => !item.needsLlm || form.llm_id).map((item) => <option key={item.value} value={item.value}>{item.label} — {item.bestFor}</option>)}
           </select>
         </Field>
-        {!modelsOf(options, 'embedding').length ? <Notice tone="warn" title="没有可用的索引模型">请先在「工具 → 模型」中接入 Embedding 模型；否则只能使用全文检索。</Notice> : null}
+        {!modelsOf(options, 'embedding').length ? <Notice tone="warn" title="没有可用的索引模型" action={me?.role === 'admin' ? <Link className="btn sm" to="/tools?tab=models">去接入</Link> : undefined}>{me?.role === 'admin' ? '接入 Embedding 模型后才能语义检索；否则只能使用全文检索。' : '请联系管理员接入 Embedding 模型；否则只能使用全文检索。'}</Notice> : null}
       </Modal>
     </div>
   );
