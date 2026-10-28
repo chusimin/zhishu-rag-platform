@@ -198,7 +198,9 @@ async def _agent_answer(
             duration = int((monotonic() - started) * 1000)
             kind = tool_kinds.get(name, "tool")
             label = tool_labels.get(name, name)
-            _span(spans, kind, label if kind != "tool" else f"工具 · {label}", duration_ms=duration, status=status, detail=result[:2000], tool=name, label=label, arguments=arguments, step=step_number)
+            # 知识库工具成功时，内部的逐库检索 Span 已记录耗时与召回，不再重复记一层
+            if not (kind == "retrieval" and status == "success"):
+                _span(spans, kind, label if kind != "tool" else f"工具 · {label}", duration_ms=duration, status=status, detail=result[:2000], tool=name, label=label, arguments=arguments, step=step_number)
             steps.append({"step": step_number, "tool": name, "label": label, "kind": kind, "arguments": arguments, "status": status, "result": result[:4000], "duration_ms": duration})
             messages.append(ToolMessage(content=result[:12000], tool_call_id=call_id, name=name))
     _span(spans, "harness", "达到最大推理步数", status="error", detail=f"max_steps={manifest.agent.max_steps}")

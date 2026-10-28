@@ -207,7 +207,7 @@ async def test_agent_uses_knowledge_as_tool_and_records_spans(client: AsyncClien
 
     detail = await client.get(f"/api/v1/observability/runs/{result['trace_id']}", headers=ADMIN)
     kinds = [span["kind"] for span in detail.json()["spans"]]
-    assert kinds == ["context", "model", "retrieval", "retrieval", "model"]
+    assert kinds == ["context", "model", "retrieval", "model"]
     first_model = detail.json()["spans"][1]
     assert first_model["metadata"]["tool_calls"][0]["name"] == "knowledge_search"
     assert detail.json()["tokens"]["total"] == 186
