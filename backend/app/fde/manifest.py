@@ -72,6 +72,8 @@ class AgentSettings(FDEModel):
     require_confirmation_for_side_effects: bool = True
     show_tool_steps: bool = True
     long_term_memory: bool = False
+    # tool: 知识库作为工具，由 Agent 决定何时检索；always: 每轮先检索再交给 Agent
+    knowledge_mode: Literal["tool", "always"] = "tool"
 
 
 class Guardrails(FDEModel):

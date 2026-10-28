@@ -93,7 +93,16 @@ async def init_db(target_engine: AsyncEngine | None = None) -> None:
                 "output_json": "JSON",
                 "app_version_id": "VARCHAR(36)",
             },
-            "query_logs": {"workspace_id": f"VARCHAR(36) NOT NULL DEFAULT '{default_workspace}'"},
+            "query_logs": {
+                "workspace_id": f"VARCHAR(36) NOT NULL DEFAULT '{default_workspace}'",
+                "app_version_id": "VARCHAR(36)",
+                "channel": "VARCHAR(24) NOT NULL DEFAULT 'web'",
+                "model_id": "VARCHAR(36)",
+                "model_name": "VARCHAR(180)",
+                "cost": "DOUBLE PRECISION",
+                "message_id": "VARCHAR(36)",
+                "run_metadata": "JSON NOT NULL DEFAULT '{}'",
+            },
         }
         for table, columns in additions.items():
             if active_engine.dialect.name == "sqlite":

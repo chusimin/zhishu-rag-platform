@@ -276,6 +276,14 @@ class QueryLog(Base, WorkspaceMixin):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # 可观测字段：一次运行对应的版本、渠道、模型、费用与回答消息
+    app_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    channel: Mapped[str] = mapped_column(String(24), default="web", nullable=False, index=True)
+    model_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    message_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    run_metadata: Mapped[dict[str, Any]] = mapped_column(SAJSON, default=dict, nullable=False)
     traces: Mapped[list[TraceStep]] = relationship(back_populates="query_log", cascade="all, delete-orphan", order_by="TraceStep.ordinal")
 
 

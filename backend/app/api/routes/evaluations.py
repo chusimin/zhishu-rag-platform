@@ -173,7 +173,9 @@ async def _set_payload(session: AsyncSession, suite: EvaluationSuite, app: QAApp
 async def _source_snapshot(session: AsyncSession, log: QueryLog, app: QAApp) -> tuple[str, dict[str, Any], dict[str, Any]]:
     assistant = None
     context_messages: list[Message] = []
-    if log.conversation_id:
+    if log.message_id:
+        assistant = await session.get(Message, log.message_id)
+    if assistant is None and log.conversation_id:
         assistant = await session.scalar(
             select(Message)
             .where(
@@ -184,35 +186,41 @@ async def _source_snapshot(session: AsyncSession, log: QueryLog, app: QAApp) -> 
             .order_by(Message.created_at)
             .limit(1)
         )
-        if assistant:
-            context_messages = list(
-                await session.scalars(
-                    select(Message)
-                    .where(
-                        Message.conversation_id == log.conversation_id,
-                        Message.created_at <= assistant.created_at,
-                    )
-                    .order_by(Message.created_at.desc())
-                    .limit(50)
+    if assistant and log.conversation_id:
+        context_messages = list(
+            await session.scalars(
+                select(Message)
+                .where(
+                    Message.conversation_id == log.conversation_id,
+                    Message.created_at <= assistant.created_at,
                 )
+                .order_by(Message.created_at.desc())
+                .limit(50)
             )
-            context_messages.reverse()
+        )
+        context_messages.reverse()
 
     model_snapshot: dict[str, Any] | None = None
-    llm_trace = next((item for item in log.traces if item.name in {"LLM 生成", "模型生成"}), None)
+    if log.model_name:
+        model_snapshot = {
+            "provider": (log.run_metadata or {}).get("provider"),
+            "model": log.model_name,
+            "simulated": (log.run_metadata or {}).get("simulated"),
+        }
+    llm_trace = None if model_snapshot else next((item for item in log.traces if item.name in {"LLM 生成", "模型生成"}), None)
     if llm_trace:
         model_snapshot = {
             "provider": llm_trace.metadata_json.get("provider"),
             "model": llm_trace.metadata_json.get("model"),
             "simulated": llm_trace.metadata_json.get("simulated"),
         }
-    elif app.llm_model_id:
+    elif not model_snapshot and app.llm_model_id:
         model = await session.get(ModelConfig, app.llm_model_id)
         if model:
             model_snapshot = {"provider": model.provider, "model": model.model_name, "simulated": model.provider == "mock"}
 
     version_snapshot = None
-    version_id = assistant.app_version_id if assistant else None
+    version_id = log.app_version_id or (assistant.app_version_id if assistant else None)
     if version_id:
         version = await session.get(AppVersion, version_id)
         if version and version.app_id == app.id:
@@ -237,7 +245,7 @@ async def _source_snapshot(session: AsyncSession, log: QueryLog, app: QAApp) -> 
         "application": {"id": app.id, "name": app.name},
         "app_version": version_snapshot,
         "model": model_snapshot,
-        "channel": "online_chat",
+        "channel": log.channel or "online_chat",
         "demo_role": log.demo_role,
         "started_at": log.started_at.isoformat(),
         "finished_at": log.finished_at.isoformat() if log.finished_at else None,

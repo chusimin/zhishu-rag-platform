@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 from time import monotonic
 from typing import Any
 
@@ -36,6 +37,35 @@ def _sum_usage(total: dict[str, int | None], current: dict[str, int | None]) -> 
             total[key] = int(total.get(key) or 0) + int(current[key] or 0)
 
 
+def _span(
+    spans: list[dict[str, Any]] | None,
+    kind: str,
+    name: str,
+    *,
+    started: float | None = None,
+    duration_ms: int | None = None,
+    status: str = "success",
+    detail: str = "",
+    **metadata: Any,
+) -> dict[str, Any]:
+    """Append one execution step to the run trace (persisted as TraceStep)."""
+    item = {
+        "kind": kind,
+        "name": name,
+        "status": status,
+        "duration_ms": duration_ms if duration_ms is not None else int((monotonic() - started) * 1000) if started is not None else 0,
+        "detail": detail[:4000],
+        "metadata": metadata,
+    }
+    if spans is not None:
+        spans.append(item)
+    return item
+
+
+KNOWLEDGE_TOOL = "knowledge_search"
+HANDOFF_TOOL = "transfer_to_human"
+
+
 async def _agent_answer(
     session: AsyncSession,
     manifest: Manifest,
@@ -47,7 +77,11 @@ async def _agent_answer(
     history: list[Any],
     workspace_id: str,
     confirmed_tool_names: set[str] | None = None,
+    spans: list[dict[str, Any]] | None = None,
+    knowledge_search: Callable[[str], Awaitable[str]] | None = None,
+    state: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, int | None], list[dict[str, Any]]]:
+    state = state if state is not None else {}
     references = [item for item in manifest.tools if item.enabled and item.tool_id]
     ids = [item.tool_id for item in references if item.tool_id]
     configs = list(await session.scalars(select(ToolConfig).where(ToolConfig.id.in_(ids), ToolConfig.workspace_id == workspace_id, ToolConfig.is_enabled.is_(True)))) if ids else []
@@ -57,6 +91,7 @@ async def _agent_answer(
 
     tools: list[StructuredTool] = []
     side_effects: dict[str, bool] = {}
+    tool_kinds: dict[str, str] = {}
     for reference in references:
         config = by_id[reference.tool_id or ""]
 
@@ -71,15 +106,46 @@ async def _agent_answer(
             coroutine=invoke,
         ))
         side_effects[reference.name] = bool(config.config.get("side_effect", False))
+        tool_kinds[reference.name] = "tool"
+
+    if knowledge_search is not None:
+        async def search(query: str) -> str:
+            return await knowledge_search(query)
+
+        tools.append(StructuredTool(
+            name=KNOWLEDGE_TOOL,
+            description="检索应用关联的企业知识库。回答产品、政策、制度、流程等事实问题前先调用；query 写成独立完整的检索问题。",
+            args_schema={"type": "object", "required": ["query"], "properties": {"query": {"type": "string", "description": "检索问题"}}},
+            coroutine=search,
+        ))
+        tool_kinds[KNOWLEDGE_TOOL] = "retrieval"
+
+    if manifest.guardrails.human_handoff:
+        async def handoff(reason: str = "") -> str:
+            state["handoff"] = True
+            state["handoff_reason"] = reason
+            return "已转接人工坐席。请告知用户稍候，并简要说明转接原因。"
+
+        tools.append(StructuredTool(
+            name=HANDOFF_TOOL,
+            description="把会话转接给人工坐席。用户要求人工、涉及投诉赔偿，或你无法可靠解决时调用。",
+            args_schema={"type": "object", "properties": {"reason": {"type": "string", "description": "转接原因"}}},
+            coroutine=handoff,
+        ))
+        tool_kinds[HANDOFF_TOOL] = "handoff"
 
     model = gateway.chat_model(temperature=manifest.model.temperature, max_tokens=manifest.model.max_tokens)
     if not tools or gateway.is_simulated:
+        started = monotonic()
         response = await model.ainvoke([
             SystemMessage(content=f"{manifest.system_prompt}\n\n业务输入：\n{input_text or '无'}\n\n知识上下文：\n{context or '无'}"),
             *(_history(history, manifest.memory.max_turns) if manifest.memory.enabled else []),
             HumanMessage(content=query),
         ])
-        return _content_text(response.content).strip(), _usage(response), []
+        usage = _usage(response)
+        answer = _content_text(response.content).strip()
+        _span(spans, "model", "模型生成", started=started, detail=answer[:2000], tokens=usage, simulated=bool(gateway.is_simulated))
+        return answer, usage, []
 
     bound = model.bind_tools(tools)
     messages: list[BaseMessage] = [
@@ -91,20 +157,29 @@ async def _agent_answer(
     steps: list[dict[str, Any]] = []
     total_usage: dict[str, int | None] = {"input": None, "output": None, "total": None}
     for step_number in range(1, manifest.agent.max_steps + 1):
+        started = monotonic()
         response = await bound.ainvoke(messages)
-        _sum_usage(total_usage, _usage(response))
+        usage = _usage(response)
+        _sum_usage(total_usage, usage)
         messages.append(response)
         calls = getattr(response, "tool_calls", None) or []
+        text = _content_text(response.content).strip()
+        _span(
+            spans, "model", f"模型推理 #{step_number}", started=started,
+            detail=text[:2000] if text else "请求调用：" + "、".join(str(call.get("name", "")) for call in calls),
+            tokens=usage, step=step_number,
+            tool_calls=[{"name": call.get("name"), "arguments": call.get("args") or {}} for call in calls],
+        )
         if not calls:
-            answer = _content_text(response.content).strip()
-            if not answer:
+            if not text:
                 raise ValueError("Agent 未返回最终回答")
-            return answer, total_usage, steps
+            return text, total_usage, steps
         for call in calls:
             name = str(call.get("name", ""))
             call_id = str(call.get("id", f"tool-{step_number}"))
             arguments = call.get("args") or {}
             tool = tool_by_name.get(name)
+            started = monotonic()
             if tool is None:
                 result = f"工具不存在：{name}"
                 status = "error"
@@ -118,8 +193,13 @@ async def _agent_answer(
                 except Exception as exc:
                     result = f"工具调用失败：{type(exc).__name__}: {exc}"
                     status = "error"
-            steps.append({"step": step_number, "tool": name, "arguments": arguments, "status": status, "result": result[:4000]})
+            duration = int((monotonic() - started) * 1000)
+            kind = tool_kinds.get(name, "tool")
+            label = "知识库检索" if kind == "retrieval" else "转人工" if kind == "handoff" else f"工具 · {name}"
+            _span(spans, kind, label, duration_ms=duration, status=status, detail=result[:2000], tool=name, arguments=arguments, step=step_number)
+            steps.append({"step": step_number, "tool": name, "kind": kind, "arguments": arguments, "status": status, "result": result[:4000], "duration_ms": duration})
             messages.append(ToolMessage(content=result[:12000], tool_call_id=call_id, name=name))
+    _span(spans, "harness", "达到最大推理步数", status="error", detail=f"max_steps={manifest.agent.max_steps}")
     raise ValueError(f"Agent 已达到最大推理步数 {manifest.agent.max_steps}，未能生成最终回答")
 
 
@@ -282,6 +362,37 @@ def _check_json_schema(value: Any, schema: dict[str, Any], path: str = "output")
             _check_json_schema(item, schema["items"], f"{path}.{index}")
 
 
+def model_snapshot(model: ModelConfig, *, simulated: bool) -> dict[str, Any]:
+    """Model identity plus the price snapshot used for cost attribution."""
+    config = model.config or {}
+    input_price = config.get("input_price_per_million")
+    output_price = config.get("output_price_per_million")
+    return {
+        "id": model.id,
+        "name": model.model_name,
+        "display_name": model.display_name,
+        "provider": model.provider,
+        "simulated": simulated,
+        "pricing": {
+            "input_per_million": float(input_price) if input_price not in (None, "") else None,
+            "output_per_million": float(output_price) if output_price not in (None, "") else None,
+            "currency": str(config.get("currency") or "USD"),
+        },
+    }
+
+
+def estimate_cost(tokens: dict[str, int | None], pricing: dict[str, Any] | None) -> float | None:
+    if not pricing or pricing.get("input_per_million") is None or pricing.get("output_per_million") is None:
+        return None
+    if tokens.get("input") is None and tokens.get("output") is None:
+        return None
+    return round(
+        (tokens.get("input") or 0) * pricing["input_per_million"] / 1_000_000
+        + (tokens.get("output") or 0) * pricing["output_per_million"] / 1_000_000,
+        8,
+    )
+
+
 async def execute_manifest(
     session: AsyncSession,
     manifest: Manifest | dict[str, Any],
@@ -291,6 +402,7 @@ async def execute_manifest(
     history: list[Any] | None = None,
     workspace_id: str,
     confirmed_tool_names: set[str] | None = None,
+    spans: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     started = monotonic()
     manifest = manifest if isinstance(manifest, Manifest) else Manifest.model_validate(manifest)
@@ -317,12 +429,13 @@ async def execute_manifest(
         or not model.is_enabled
     ):
         raise ValueError("Configured LLM model is missing, disabled, or outside the workspace")
+    gateway = build_gateway(model)
+    model_info = model_snapshot(model, simulated=bool(gateway.is_simulated))
 
     retrieval_config = _retrieval_config(manifest)
-    retrieved: list[RetrievedChunk] = []
-    retrieval_simulated = False
+    knowledge_bases: dict[str, KnowledgeBase] = {}
     if manifest.knowledge_base_ids:
-        knowledge_bases = list(
+        loaded = list(
             await session.scalars(
                 select(KnowledgeBase).where(
                     KnowledgeBase.id.in_(manifest.knowledge_base_ids),
@@ -330,56 +443,107 @@ async def execute_manifest(
                 )
             )
         )
-        by_id = {item.id: item for item in knowledge_bases}
-        if set(by_id) != set(manifest.knowledge_base_ids):
+        knowledge_bases = {item.id: item for item in loaded}
+        if set(knowledge_bases) != set(manifest.knowledge_base_ids):
             raise ValueError("A configured knowledge base is unavailable in this workspace")
-        runs = []
-        for knowledge_base_id in manifest.knowledge_base_ids:
-            run = await retrieve_knowledge_base(
-                session,
-                by_id[knowledge_base_id],
-                query,
-                top_k=retrieval_config["top_k"],
-                rerank_top_n=retrieval_config["rerank_top_n"],
-                score_threshold=retrieval_config["score_threshold"],
-                mode=retrieval_config["mode"],
-            )
-            runs.append(run)
-            retrieval_simulated = retrieval_simulated or run.simulated
+
+    retrieval_state = {"simulated": False}
+
+    async def retrieve_all(text: str) -> list[RetrievedChunk]:
         fusion_scores: dict[str, float] = {}
         chunks_by_id: dict[str, RetrievedChunk] = {}
-        for run in runs:
+        for knowledge_base_id in manifest.knowledge_base_ids:
+            knowledge_base = knowledge_bases[knowledge_base_id]
+            try:
+                run = await retrieve_knowledge_base(
+                    session,
+                    knowledge_base,
+                    text,
+                    top_k=retrieval_config["top_k"],
+                    rerank_top_n=retrieval_config["rerank_top_n"],
+                    score_threshold=retrieval_config["score_threshold"],
+                    mode=retrieval_config["mode"],
+                )
+            except Exception as exc:
+                _span(spans, "retrieval", f"检索 · {knowledge_base.name}", status="error", detail=str(exc), knowledge_base_id=knowledge_base.id, query=text)
+                raise
+            retrieval_state["simulated"] = retrieval_state["simulated"] or run.simulated
+            _span(
+                spans, "retrieval", f"检索 · {knowledge_base.name}", duration_ms=run.total_duration_ms,
+                detail=f"{retrieval_config['mode']} 召回 {run.recalled_count} 条，返回 {len(run.results)} 条",
+                knowledge_base_id=knowledge_base.id, query=text, mode=retrieval_config["mode"],
+                recalled=run.recalled_count, returned=len(run.results), rerank=run.rerank_applied,
+                top_score=round(run.results[0].final_score, 4) if run.results else None, simulated=run.simulated,
+            )
             for rank, item in enumerate(run.results, start=1):
                 fusion_scores[item.chunk_id] = fusion_scores.get(item.chunk_id, 0.0) + 1.0 / (10 + rank)
                 chunks_by_id[item.chunk_id] = item
-        retrieved = sorted(chunks_by_id.values(), key=lambda item: fusion_scores[item.chunk_id], reverse=True)
-    context, cited_chunks = _context(retrieved, retrieval_config["max_context_chars"])
-    citations = [_citation(item) for item in cited_chunks]
+        return sorted(chunks_by_id.values(), key=lambda item: fusion_scores[item.chunk_id], reverse=True)
 
-    evidence_required = manifest.guardrails.refuse_without_evidence or manifest.guardrails.require_citations
-    if manifest.knowledge_base_ids and evidence_required and not citations:
-        handoff = manifest.guardrails.human_handoff
-        content = "当前请求需要人工处理，已发起人工转接。" if handoff else "未检索到足够依据，无法可靠回答。"
-        return {
-            "content": content,
-            "citations": [],
-            "tokens": {"input": None, "output": None, "total": None},
-            "duration_ms": int((monotonic() - started) * 1000),
-            "simulated": retrieval_simulated,
-            "output_json": None,
-            "handoff": handoff,
-            "agent_steps": [],
-        }
+    agent_tool_mode = (
+        manifest.type == "agent"
+        and bool(manifest.knowledge_base_ids)
+        and manifest.agent.knowledge_mode == "tool"
+        and not gateway.is_simulated
+    )
+    citations: list[dict[str, Any]] = []
+    context = ""
+    if manifest.knowledge_base_ids and not agent_tool_mode:
+        retrieved = await retrieve_all(query)
+        context, cited_chunks = _context(retrieved, retrieval_config["max_context_chars"])
+        citations = [_citation(item) for item in cited_chunks]
+        evidence_required = manifest.guardrails.refuse_without_evidence or manifest.guardrails.require_citations
+        if evidence_required and not citations:
+            handoff = manifest.guardrails.human_handoff
+            content = "当前请求需要人工处理，已发起人工转接。" if handoff else "未检索到足够依据，无法可靠回答。"
+            _span(spans, "guardrail", "无依据拦截", status="blocked", detail=content, handoff=handoff)
+            return {
+                "content": content,
+                "citations": [],
+                "tokens": {"input": None, "output": None, "total": None},
+                "duration_ms": int((monotonic() - started) * 1000),
+                "simulated": retrieval_state["simulated"],
+                "output_json": None,
+                "handoff": handoff,
+                "agent_steps": [],
+                "model": model_info,
+            }
 
-    gateway = build_gateway(model)
-    simulated = gateway.is_simulated or retrieval_simulated
+    history_messages = _history(history or [], manifest.memory.max_turns) if manifest.memory.enabled else []
     input_text = "\n".join(
         f"{field.label} ({field.key}): {effective_values.get(field.key)}"
         for field in manifest.input_fields
         if effective_values.get(field.key) is not None
     )
+    _span(
+        spans, "context", "上下文装配", duration_ms=0,
+        detail=f"系统提示词 {len(manifest.system_prompt)} 字 · 历史 {len(history_messages)} 条 · 知识上下文 {len(context)} 字",
+        system_prompt=manifest.system_prompt[:4000], history_messages=len(history_messages), context_chars=len(context),
+        input_values=effective_values, knowledge_mode="tool" if agent_tool_mode else "prefetch" if manifest.knowledge_base_ids else "none",
+    )
+
     agent_steps: list[dict[str, Any]] = []
+    agent_state: dict[str, Any] = {}
     if manifest.type == "agent":
+        knowledge_search = None
+        if agent_tool_mode:
+            async def knowledge_search(text: str) -> str:
+                retrieved = await retrieve_all(text or query)
+                known = {item["chunk_id"]: index for index, item in enumerate(citations, start=1)}
+                parts: list[str] = []
+                remaining = retrieval_config["max_context_chars"]
+                for item in retrieved:
+                    if item.chunk_id not in known:
+                        citations.append(_citation(item))
+                        known[item.chunk_id] = len(citations)
+                    heading = f"[资料 {known[item.chunk_id]}] {item.filename}" + (f" 第 {item.page_number} 页" if item.page_number else "")
+                    body = item.content[: max(0, remaining - len(heading) - 2)]
+                    if not body:
+                        break
+                    parts.append(f"{heading}\n{body}")
+                    remaining -= len(heading) + len(body) + 2
+                return "\n\n".join(parts) or "知识库中没有找到相关内容。"
+
         answer, agent_usage, agent_steps = await _agent_answer(
             session,
             manifest,
@@ -390,6 +554,9 @@ async def execute_manifest(
             history=history or [],
             workspace_id=workspace_id,
             confirmed_tool_names=confirmed_tool_names or set(),
+            spans=spans,
+            knowledge_search=knowledge_search,
+            state=agent_state,
         )
         usage = {
             "input_tokens": agent_usage.get("input"),
@@ -397,8 +564,10 @@ async def execute_manifest(
             "total_tokens": agent_usage.get("total"),
         }
     elif gateway.is_simulated:
+        step_started = monotonic()
         answer = _mock_output(manifest, message.strip(), effective_values, context)
         usage = {"input_tokens": 12, "output_tokens": 16, "total_tokens": 28}
+        _span(spans, "model", "模型生成", started=step_started, detail=answer[:2000], tokens={"input": 12, "output": 16, "total": 28}, simulated=True)
     else:
         output_instruction = ""
         if manifest.output.format == "json":
@@ -420,29 +589,34 @@ async def execute_manifest(
                 ("human", "{message}"),
             ]
         )
+        step_started = monotonic()
         response = await (prompt | gateway.chat_model(temperature=manifest.model.temperature, max_tokens=manifest.model.max_tokens)).ainvoke(
             {
                 "system_prompt": manifest.system_prompt,
                 "input_text": input_text or "无",
                 "context": context or "无知识库上下文",
-                "history": _history(history or [], manifest.memory.max_turns) if manifest.memory.enabled else [],
+                "history": history_messages,
                 "message": query,
             }
         )
         answer = _content_text(getattr(response, "content", response)).strip()
+        usage = getattr(response, "usage_metadata", None) or {}
+        _span(spans, "model", "模型生成", started=step_started, status="success" if answer else "error", detail=answer[:2000], tokens=_usage(response), simulated=False)
         if not answer:
             raise ValueError("LLM returned an empty answer")
-        usage = getattr(response, "usage_metadata", None) or {}
 
     blocked = next(
         (topic for topic in manifest.guardrails.blocked_topics if topic.lower() in answer.lower()),
         None,
     )
-    handoff = bool(blocked and manifest.guardrails.human_handoff)
+    handoff = bool(agent_state.get("handoff")) or bool(blocked and manifest.guardrails.human_handoff)
     if blocked:
-        answer = "当前请求需要人工处理，已发起人工转接。" if handoff else "生成内容触及已配置的禁止主题，已停止输出。"
+        answer = "当前请求需要人工处理，已发起人工转接。" if manifest.guardrails.human_handoff else "生成内容触及已配置的禁止主题，已停止输出。"
+        _span(spans, "guardrail", "禁止话题拦截", status="blocked", detail=f"命中：{blocked}", topic=blocked)
         output_json = None
     else:
+        if len(answer) > manifest.guardrails.max_output_chars:
+            _span(spans, "guardrail", "输出截断", status="warning", detail=f"超过 {manifest.guardrails.max_output_chars} 字，已截断")
         answer = answer[: manifest.guardrails.max_output_chars]
         output_json = None
         if manifest.output.format == "json":
@@ -461,10 +635,11 @@ async def execute_manifest(
         "citations": citations,
         "tokens": tokens,
         "duration_ms": int((monotonic() - started) * 1000),
-        "simulated": simulated,
+        "simulated": bool(gateway.is_simulated) or retrieval_state["simulated"],
         "output_json": output_json,
         "handoff": handoff,
         "agent_steps": agent_steps,
+        "model": model_info,
     }
 
 

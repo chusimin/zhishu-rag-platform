@@ -12,7 +12,7 @@ from sqlalchemy.orm import selectinload
 from ...db import get_session
 from ...fde import Manifest, list_templates, manifest_from_qa_app, validate_for_publish, validate_manifest
 from ...fde.designer import DesignError, design_manifest
-from ...fde.runtime import execute_manifest
+from ...fde.runtime import estimate_cost, execute_manifest
 from ...models import (
     AppVersion,
     AppShare,
@@ -426,7 +426,28 @@ async def unpublish(app_id: str, context: AuthContext = Depends(require_roles("a
     return _app_payload(app)
 
 
-async def _execute(app: QAApp, manifest: Manifest, version_id: str | None, payload: RunRequest, context: AuthContext, session: AsyncSession) -> dict[str, Any]:
+def _trace_steps(log: QueryLog, spans: list[dict[str, Any]]) -> list[TraceStep]:
+    return [
+        TraceStep(
+            query_log_id=log.id,
+            ordinal=ordinal,
+            name=str(span.get("name") or span.get("kind") or "step")[:120],
+            status=str(span.get("status") or "success")[:24],
+            duration_ms=int(span.get("duration_ms") or 0),
+            detail=str(span.get("detail") or "")[:4000],
+            metadata_json={"kind": span.get("kind"), **(span.get("metadata") or {})},
+        )
+        for ordinal, span in enumerate(spans, start=1)
+    ]
+
+
+def _channel(context: AuthContext, requested: str) -> str:
+    if requested == "run" and context.auth_type == "api_client":
+        return "api"
+    return {"run": "web", "preview": "debug", "share": "share"}.get(requested, requested)
+
+
+async def _execute(app: QAApp, manifest: Manifest, version_id: str | None, payload: RunRequest, context: AuthContext, session: AsyncSession, *, channel: str = "run") -> dict[str, Any]:
     history: list[Message] = []
     conversation: Conversation | None = None
     if payload.conversation_id:
@@ -437,6 +458,11 @@ async def _execute(app: QAApp, manifest: Manifest, version_id: str | None, paylo
             raise HTTPException(status_code=404, detail="会话不存在")
         history = list(await session.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at)))
     query = payload.message.strip() or next(iter(payload.input_values.values()), app.name)
+    spans: list[dict[str, Any]] = []
+    started_at = datetime.now(UTC)
+    run_channel = _channel(context, channel)
+    app_id = app.id
+    conversation_id = conversation.id if conversation else None
     try:
         result = await execute_manifest(
             session,
@@ -446,9 +472,27 @@ async def _execute(app: QAApp, manifest: Manifest, version_id: str | None, paylo
             history=history,
             workspace_id=context.workspace_id,
             confirmed_tool_names=set(payload.confirmed_tool_names),
+            spans=spans,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        # 失败运行同样进入可观测：保留已完成的步骤和错误原因。
+        await session.rollback()
+        expected = isinstance(exc, ValueError)
+        detail = str(exc) if expected else f"模型或工具调用失败：{type(exc).__name__}: {exc}"
+        model = await session.get(ModelConfig, manifest.llm_model_id) if manifest.llm_model_id else None
+        spans.append({"kind": "error", "name": "运行失败", "status": "error", "duration_ms": 0, "detail": detail, "metadata": {"exception": type(exc).__name__}})
+        log = QueryLog(
+            workspace_id=context.workspace_id, app_id=app_id, conversation_id=conversation_id,
+            demo_role=context.role, query=str(query), status=RunStatus.FAILED, error_message=detail[:4000],
+            duration_ms=int((datetime.now(UTC) - started_at).total_seconds() * 1000), started_at=started_at, finished_at=datetime.now(UTC),
+            app_version_id=version_id, channel=run_channel, model_id=model.id if model else None, model_name=model.model_name if model else None,
+            run_metadata={"input_values": payload.input_values, "app_type": manifest.type},
+        )
+        session.add(log)
+        await session.flush()
+        session.add_all(_trace_steps(log, spans))
+        await session.commit()
+        raise HTTPException(status_code=422 if expected else 502, detail={"message": detail, "trace_id": log.trace_id}) from exc
     if not conversation:
         conversation = Conversation(app_id=app.id, workspace_id=context.workspace_id, user_id=context.user_id, title=str(query)[:60], demo_role=context.role)
         session.add(conversation)
@@ -456,27 +500,30 @@ async def _execute(app: QAApp, manifest: Manifest, version_id: str | None, paylo
     conversation.updated_at = utc_now()
     user_message = Message(conversation_id=conversation.id, role="user", content=str(query), input_values=payload.input_values, app_version_id=version_id)
     assistant_message = Message(conversation_id=conversation.id, role="assistant", content=result["content"], citations=result["citations"], input_tokens=result["tokens"]["input"], output_tokens=result["tokens"]["output"], duration_ms=result["duration_ms"], simulated=result["simulated"], output_json=result["output_json"], app_version_id=version_id)
-    log = QueryLog(workspace_id=context.workspace_id, app_id=app.id, conversation_id=conversation.id, demo_role=context.role, query=str(query), status=RunStatus.SUCCESS, input_tokens=result["tokens"]["input"], output_tokens=result["tokens"]["output"], total_tokens=result["tokens"]["total"], duration_ms=result["duration_ms"], finished_at=datetime.now(UTC))
-    session.add_all([user_message, assistant_message, log])
+    session.add_all([user_message, assistant_message])
     await session.flush()
-    for ordinal, step in enumerate(result.get("agent_steps", []), start=1):
-        session.add(
-            TraceStep(
-                query_log_id=log.id,
-                ordinal=ordinal,
-                name=f"agent_tool:{step.get('tool') or 'unknown'}",
-                status=str(step.get("status") or "unknown"),
-                duration_ms=0,
-                detail=str(step.get("result") or "")[:4000],
-                metadata_json={
-                    "agent_step": step.get("step"),
-                    "tool": step.get("tool"),
-                    "arguments": step.get("arguments") or {},
-                },
-            )
-        )
+    model_info = result.get("model") or {}
+    log = QueryLog(
+        workspace_id=context.workspace_id, app_id=app.id, conversation_id=conversation.id, demo_role=context.role, query=str(query),
+        status=RunStatus.SUCCESS, input_tokens=result["tokens"]["input"], output_tokens=result["tokens"]["output"], total_tokens=result["tokens"]["total"],
+        duration_ms=result["duration_ms"], started_at=started_at, finished_at=datetime.now(UTC),
+        app_version_id=version_id, channel=run_channel, model_id=model_info.get("id"), model_name=model_info.get("name"),
+        cost=estimate_cost(result["tokens"], model_info.get("pricing")), message_id=assistant_message.id,
+        run_metadata={
+            "input_values": payload.input_values,
+            "app_type": manifest.type,
+            "simulated": result["simulated"],
+            "handoff": result["handoff"],
+            "citation_count": len(result["citations"]),
+            "pricing": model_info.get("pricing"),
+            "provider": model_info.get("provider"),
+        },
+    )
+    session.add(log)
+    await session.flush()
+    session.add_all(_trace_steps(log, spans))
     await session.commit()
-    return {**result, "conversation_id": conversation.id, "message_id": assistant_message.id, "app_version_id": version_id, "portal_path": f"/portal/apps/{app.id}"}
+    return {**result, "conversation_id": conversation.id, "message_id": assistant_message.id, "trace_id": log.trace_id, "app_version_id": version_id, "portal_path": f"/portal/apps/{app.id}"}
 
 
 async def _public_share(token: str, session: AsyncSession) -> tuple[AppShare, QAApp, AppVersion]:
@@ -539,13 +586,13 @@ async def run_public_share(token: str, payload: RunRequest, session: AsyncSessio
         raise HTTPException(status_code=410, detail="分享链接访问次数已用尽")
     await session.commit()
     context = AuthContext(role="user", workspace_id=app.workspace_id, user_id=None, auth_type="public_share")
-    return await _execute(app, Manifest.model_validate(version.manifest), version.id, payload, context, session)
+    return await _execute(app, Manifest.model_validate(version.manifest), version.id, payload, context, session, channel="share")
 
 
 @router.post("/apps/{app_id}/preview")
 async def preview(app_id: str, payload: RunRequest, context: AuthContext = Depends(require_roles("admin", "manager")), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     app = await _app(session, app_id, context.workspace_id)
-    return await _execute(app, _draft(app), None, payload, context, session)
+    return await _execute(app, _draft(app), None, payload, context, session, channel="preview")
 
 
 @router.post("/apps/{app_id}/run")
