@@ -211,3 +211,48 @@ async def test_agent_uses_knowledge_as_tool_and_records_spans(client: AsyncClien
     first_model = detail.json()["spans"][1]
     assert first_model["metadata"]["tool_calls"][0]["name"] == "knowledge_search"
     assert detail.json()["tokens"]["total"] == 186
+
+
+async def test_trace_to_evaluation_set_to_release_gate_loop(client: AsyncClient) -> None:
+    model_id = await priced_mock_llm(client)
+    app_id = await content_app(client, model_id)
+    ran = await client.post(f"/api/v1/fde/apps/{app_id}/preview", headers=ADMIN, json={"input_values": content_inputs()})
+    trace_id = ran.json()["trace_id"]
+
+    created = await client.post("/api/v1/evaluation-sets", headers=ADMIN, json={"app_id": app_id, "name": "文案回归集"})
+    suite_id = created.json()["id"]
+    returned = await client.post(f"/api/v1/evaluation-sets/{suite_id}/cases/from-logs", headers=ADMIN, json={"trace_ids": [trace_id], "case_type": "bad"})
+    assert returned.status_code == 201, returned.text
+    case = returned.json()["cases"][0]
+    assert case["readiness"] == "needs_standard"
+    assert case["input_values"]["dish_name"] == "云南汽锅鸡"
+    assert case["source_snapshot"]["channel"] == "debug"
+    assert case["source_snapshot"]["model"]["model"] == "priced-test"
+    assert (await client.post(f"/api/v1/evaluation-sets/{suite_id}/run", headers=ADMIN)).status_code == 409
+
+    patched = await client.patch(f"/api/v1/evaluation-sets/{suite_id}/cases/{case['id']}", headers=ADMIN, json={"expected_keywords": ["云南汽锅鸡"]})
+    assert patched.json()["readiness"] == "ready"
+    manual = await client.post(
+        f"/api/v1/evaluation-sets/{suite_id}/cases",
+        headers=ADMIN,
+        json={"name": "手工用例", "message": "写一段文案", "input_values": content_inputs(), "expected_keywords": ["汽锅鸡"]},
+    )
+    assert manual.status_code == 201, manual.text
+    assert manual.json()["readiness"] == "ready"
+
+    passed = await client.post(f"/api/v1/evaluation-sets/{suite_id}/run", headers=ADMIN)
+    assert passed.json()["passed_count"] == 2, passed.text
+
+    gate = await client.patch(f"/api/v1/evaluation-sets/{suite_id}", headers=ADMIN, json={"is_release_gate": True})
+    assert gate.json()["is_release_gate"] is True
+    assert (await client.post(f"/api/v1/fde/apps/{app_id}/versions", headers=ADMIN, json={"release_notes": "v1"})).status_code == 201
+    assert (await client.post(f"/api/v1/fde/apps/{app_id}/publish", headers=ADMIN, json={})).status_code == 200
+
+    failing = await client.post(
+        f"/api/v1/evaluation-sets/{suite_id}/cases",
+        headers=ADMIN,
+        json={"name": "必然失败", "message": "写一段文案", "input_values": content_inputs(), "expected_keywords": ["不存在的词"]},
+    )
+    assert (await client.post(f"/api/v1/evaluation-sets/{suite_id}/run", headers=ADMIN)).json()["failed_count"] == 1
+    assert (await client.post(f"/api/v1/fde/apps/{app_id}/publish", headers=ADMIN, json={})).status_code == 409
+    assert (await client.delete(f"/api/v1/evaluation-sets/{suite_id}/cases/{failing.json()['id']}", headers=ADMIN)).status_code == 204

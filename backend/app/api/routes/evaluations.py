@@ -39,6 +39,18 @@ class EvaluationSetCreate(BaseModel):
 class EvaluationSetUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=180)
     description: str | None = Field(default=None, max_length=4000)
+    is_release_gate: bool | None = None
+
+
+class EvaluationCaseCreate(BaseModel):
+    name: str = Field(min_length=1, max_length=180)
+    message: str = Field(min_length=1, max_length=12000)
+    input_values: dict[str, Any] = Field(default_factory=dict)
+    expected_output: str = Field(default="", max_length=30000)
+    expected_keywords: list[str] = Field(default_factory=list, max_length=20)
+    forbidden_keywords: list[str] = Field(default_factory=list, max_length=20)
+    require_citations: bool = False
+    tags: list[str] = Field(default_factory=list, max_length=20)
 
 
 class CasesFromLogsRequest(BaseModel):
@@ -485,3 +497,46 @@ async def run_evaluation_set(
     session.add(AuditEvent(workspace_id=context.workspace_id, actor_id=context.user_id, action="evaluation_set.run", resource_type="evaluation_set", resource_id=suite.id, detail={"passed": run.passed_count, "failed": run.failed_count}))
     await session.commit()
     return {"id": run.id, "status": run.status, "passed_count": run.passed_count, "failed_count": run.failed_count, "results": results, "simulated": run.simulated, "created_at": run.created_at}
+
+
+@router.post("/{suite_id}/cases", status_code=201)
+async def create_evaluation_case(
+    suite_id: str,
+    payload: EvaluationCaseCreate,
+    context: AuthContext = Depends(require_roles("admin", "manager")),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    suite, _ = await _suite(session, suite_id, context.workspace_id)
+    case = EvaluationCase(
+        suite_id=suite.id,
+        name=payload.name.strip(),
+        message=payload.message,
+        input_values=payload.input_values,
+        expected_output=payload.expected_output,
+        expected_keywords=[item.strip() for item in payload.expected_keywords if item.strip()],
+        forbidden_keywords=[item.strip() for item in payload.forbidden_keywords if item.strip()],
+        require_citations=payload.require_citations,
+        tags=list(dict.fromkeys(item.strip() for item in payload.tags if item.strip())),
+        case_type="manual",
+        created_by=context.user_id,
+        source_snapshot={},
+    )
+    case.readiness = _case_readiness(case)
+    session.add(case)
+    await session.commit()
+    return _case_payload(case)
+
+
+@router.delete("/{suite_id}/cases/{case_id}", status_code=204)
+async def delete_evaluation_case(
+    suite_id: str,
+    case_id: str,
+    context: AuthContext = Depends(require_roles("admin", "manager")),
+    session: AsyncSession = Depends(get_session),
+) -> None:
+    suite, _ = await _suite(session, suite_id, context.workspace_id)
+    case = await session.get(EvaluationCase, case_id)
+    if not case or case.suite_id != suite.id:
+        raise HTTPException(status_code=404, detail="Case 不存在")
+    await session.delete(case)
+    await session.commit()
