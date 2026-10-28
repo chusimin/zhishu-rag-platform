@@ -55,7 +55,7 @@ export function KnowledgeDetailPage() {
           <Route index element={<FilesView kb={kb} onChanged={reload} />} />
           <Route path="files/:fileId" element={<ChunksView kb={kb} />} />
           <Route path="search" element={<SearchView kb={kb} />} />
-          <Route path="settings" element={<SettingsView kb={kb} onSaved={setKb} />} />
+          <Route path="settings" element={<SettingsView kb={kb} onSaved={setKb} usedBy={usedBy} />} />
         </Routes>
       </section>
     </div>
@@ -112,15 +112,17 @@ function FilesView({ kb, onChanged }: { kb: ApiKnowledgeBase; onChanged: () => v
     return true;
   });
 
-  const retry = async (file: ApiKnowledgeFile, config?: ApiChunkConfig) => {
+  const retry = async (file: ApiKnowledgeFile, config?: ApiChunkConfig): Promise<boolean> => {
     setBusy(file.id);
     try {
       await apiFetch(`/knowledge-bases/${kb.id}/files/${file.id}/retry`, { method: 'POST', body: JSON.stringify(config ? { chunk_config: config } : {}) });
       toast(config ? `已按「${METHOD_LABEL[config.method]}」重新切块` : '已重新处理');
       await load();
       onChanged();
+      return true;
     } catch (caught) {
       toast(errorMessage(caught), 'error');
+      return false;
     } finally {
       setBusy('');
     }
@@ -156,7 +158,7 @@ function FilesView({ kb, onChanged }: { kb: ApiKnowledgeBase; onChanged: () => v
               const status = FILE_STATUS[file.status] ?? { label: file.status, tone: '' };
               const method = (file.chunk_config?.method ?? kb.chunk_method) as ApiChunkConfig['method'];
               return (
-                <tr key={file.id} className="clickable" onClick={() => file.status === 'completed' && navigate(`/knowledge/${kb.id}/files/${file.id}`)}>
+                <tr key={file.id} className={file.status === 'completed' ? 'clickable' : undefined} title={file.status === 'completed' ? '查看分块' : '处理完成后可查看分块'} onClick={() => file.status === 'completed' && navigate(`/knowledge/${kb.id}/files/${file.id}`)}>
                   <td><div className="row"><FileIcon file={file} /><div><div style={{ fontWeight: 500 }}>{file.filename}</div><div className="faint">{formatBytes(file.size_bytes)}{file.page_count ? ` · ${file.page_count} 页` : ''}</div></div></div></td>
                   <td><Tag tone="blue">{METHOD_LABEL[method] ?? method}</Tag></td>
                   <td>{file.chunk_count || '—'}</td>
@@ -182,7 +184,7 @@ function FilesView({ kb, onChanged }: { kb: ApiKnowledgeBase; onChanged: () => v
       ) : files?.length ? <Empty title="没有符合条件的文件" /> : null}
 
       <Modal open={!!rechunk} wide title={`重新切块：${rechunk?.file.filename ?? ''}`} onClose={() => setRechunk(null)}
-        footer={<><button className="btn" onClick={() => setRechunk(null)}>取消</button><button className="btn primary" disabled={!!rechunkProblem || busy === rechunk?.file.id} onClick={async () => { if (rechunk) { await retry(rechunk.file, rechunk.config); setRechunk(null); } }}>确认重新切块</button></>}>
+        footer={<><button className="btn" onClick={() => setRechunk(null)}>取消</button><button className="btn primary" disabled={!!rechunkProblem || busy === rechunk?.file.id} onClick={async () => { if (rechunk && await retry(rechunk.file, rechunk.config)) setRechunk(null); }}>确认重新切块</button></>}>
         {rechunk ? <>
           <p className="muted" style={{ marginBottom: 12 }}>会重新解析该文件并替换它的全部分块与向量；人工编辑过的元数据会保留。</p>
           <MethodPicker kb={kb} value={rechunk.config.method} recommended={recommendedMethod(rechunk.file.filename).method} onChange={(method) => setRechunk({ ...rechunk, config: { ...rechunk.config, method } })} />
@@ -340,7 +342,12 @@ function SearchView({ kb }: { kb: ApiKnowledgeBase }) {
     }
   };
 
-  const words = query.trim().split(/\s+/).filter((item) => item.length > 1);
+  // 中文问题通常没有空格：按标点切词，再把较长的中文片段拆成双字词，用于命中高亮
+  const words = useMemo(() => {
+    const terms = query.trim().split(/[\s,，。？?！!、；;：:]+/).filter((item) => item.length > 1);
+    const grams = terms.flatMap((term) => (/^[\u4e00-\u9fff]{3,}$/.test(term) ? Array.from({ length: term.length - 1 }, (_, index) => term.slice(index, index + 2)) : [term]));
+    return Array.from(new Set(grams)).sort((a, b) => b.length - a.length);
+  }, [query]);
   const highlight = (text: string) => {
     if (!words.length) return text;
     const re = new RegExp(`(${words.map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')})`, 'g');
@@ -351,7 +358,7 @@ function SearchView({ kb }: { kb: ApiKnowledgeBase }) {
     <div className="page" style={{ display: 'flex', gap: 24, alignItems: 'flex-start', flexWrap: 'wrap' }}>
       <div style={{ width: 380, maxWidth: '100%', flex: 'none' }}>
         <h1 style={{ fontSize: 20, fontWeight: 600 }}>检索测试</h1>
-        <p className="muted" style={{ margin: '4px 0 16px' }}>用真实问题验证召回效果；参数可在应用的知识库设置中复用。</p>
+        <p className="muted" style={{ margin: '4px 0 16px' }}>用真实问题验证召回效果；调好的参数可填到应用编排的「检索参数」中。</p>
         <div className="card pad">
           <textarea className="textarea" aria-label="测试问题" placeholder="输入一个用户可能会问的问题" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void run(); }} />
           <Field label="检索模式">
@@ -399,7 +406,7 @@ function SearchView({ kb }: { kb: ApiKnowledgeBase }) {
 
 /* ------------------------------ 配置 ------------------------------ */
 
-function SettingsView({ kb, onSaved }: { kb: ApiKnowledgeBase; onSaved: (kb: ApiKnowledgeBase) => void }) {
+function SettingsView({ kb, onSaved, usedBy }: { kb: ApiKnowledgeBase; onSaved: (kb: ApiKnowledgeBase) => void; usedBy: FDEApp[] }) {
   const navigate = useNavigate();
   const toast = useToast();
   const [options, setOptions] = useState<ApiModelOption[]>([]);
@@ -417,6 +424,7 @@ function SettingsView({ kb, onSaved }: { kb: ApiKnowledgeBase; onSaved: (kb: Api
     </select>
   );
   const embeddingChanged = draft.embedding_model_id !== kb.embedding_model_id;
+  const sizeProblem = draft.chunk_overlap >= draft.chunk_size ? '重叠长度必须小于块大小' : draft.chunk_size < 100 || draft.chunk_size > 4000 ? '块大小需在 100–4000 之间' : null;
 
   const save = async () => {
     setBusy(true);
@@ -430,7 +438,9 @@ function SettingsView({ kb, onSaved }: { kb: ApiKnowledgeBase; onSaved: (kb: Api
         }),
       });
       onSaved(updated);
-      toast(embeddingChanged ? '已保存。索引模型已变更，请重建全部索引' : '配置已保存');
+      toast('配置已保存');
+      // 索引模型变了，旧向量已不可用：直接询问是否立即重建
+      if (embeddingChanged && kb.file_count) setRebuild(true);
     } catch (caught) {
       toast(errorMessage(caught), 'error');
     } finally {
@@ -440,7 +450,7 @@ function SettingsView({ kb, onSaved }: { kb: ApiKnowledgeBase; onSaved: (kb: Api
 
   return (
     <div className="page" style={{ maxWidth: 880 }}>
-      <div className="page-head"><div className="grow"><h1>配置</h1><p>新导入文件的默认设置；已导入的文件保留各自的切块方式。</p></div><button className="btn primary" disabled={busy || !draft.name.trim()} onClick={() => void save()}>{busy ? <Spinner /> : null}保存</button></div>
+      <div className="page-head"><div className="grow"><h1>配置</h1><p>新导入文件的默认设置；已导入的文件保留各自的切块方式。</p></div><button className="btn primary" disabled={busy || !draft.name.trim() || !!sizeProblem} onClick={() => void save()}>{busy ? <Spinner /> : null}保存</button></div>
       <div className="card pad">
         <div className="section-title" style={{ marginTop: 0 }}>基础信息</div>
         <Field label="名称" required><input className="input" value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></Field>
@@ -460,6 +470,7 @@ function SettingsView({ kb, onSaved }: { kb: ApiKnowledgeBase; onSaved: (kb: Api
       <div className="card pad" style={{ marginTop: 16 }}>
         <div className="section-title" style={{ marginTop: 0 }}>新文件默认切块</div>
         <MethodPicker kb={draft} value={draft.chunk_method} onChange={(method) => setDraft({ ...draft, chunk_method: method })} />
+        {sizeProblem ? <div style={{ marginTop: 12 }}><Notice tone="error">{sizeProblem}</Notice></div> : null}
         <div className="form-grid" style={{ marginTop: 14 }}>
           <Field label="块大小"><input className="input" type="number" min={100} max={4000} value={draft.chunk_size} onChange={(event) => setDraft({ ...draft, chunk_size: Number(event.target.value) })} /></Field>
           <Field label="重叠长度"><input className="input" type="number" min={0} max={1000} value={draft.chunk_overlap} onChange={(event) => setDraft({ ...draft, chunk_overlap: Number(event.target.value) })} /></Field>
@@ -470,12 +481,12 @@ function SettingsView({ kb, onSaved }: { kb: ApiKnowledgeBase; onSaved: (kb: Api
         <button className="btn" onClick={() => setRebuild(true)}><RefreshCw size={14} />重建</button>
       </div>
       <div className="card pad row" style={{ marginTop: 16, borderColor: '#fee4e2' }}>
-        <div className="grow"><strong>删除知识库</strong><div className="faint">删除 {kb.file_count} 个文件和全部索引，引用它的应用会失去该知识来源。</div></div>
+        <div className="grow"><strong>删除知识库</strong><div className="faint">删除 {kb.file_count} 个文件和全部索引{usedBy.length ? `，${usedBy.length} 个应用正在引用` : ''}。</div></div>
         <button className="btn danger" onClick={() => setRemoving(true)}><Trash2 size={14} />删除</button>
       </div>
-      <ConfirmModal open={rebuild} title="重建全部索引" body={`将为 ${kb.file_count} 个文件重新执行解析、切块和向量化，可能产生模型调用费用。`} confirmText="开始重建" onClose={() => setRebuild(false)}
+      <ConfirmModal open={rebuild} title="重建全部索引" body={`将为 ${kb.file_count} 个文件重新执行解析、切块和向量化，可能产生模型调用费用。索引模型变更后需重建，检索才会恢复。`} confirmText="开始重建" onClose={() => setRebuild(false)}
         onConfirm={async () => { try { await apiFetch(`/knowledge-bases/${kb.id}/rebuild`, { method: 'POST' }); toast('已开始重建'); navigate(`/knowledge/${kb.id}`); } catch (caught) { toast(errorMessage(caught), 'error'); } }} />
-      <ConfirmModal open={removing} danger title="删除知识库" confirmText="永久删除" body={`确定删除「${kb.name}」？此操作不可恢复。`} onClose={() => setRemoving(false)}
+      <ConfirmModal open={removing} danger title="删除知识库" confirmText="永久删除" body={<>确定删除「{kb.name}」？此操作不可恢复。{usedBy.length ? <div style={{ marginTop: 8 }}><Notice tone="warn" title={`${usedBy.length} 个应用正在引用本库`}>{usedBy.map((app) => app.name).join('、')}——删除后它们将失去该知识来源，请先在应用中移除或替换。</Notice></div> : null}</>} onClose={() => setRemoving(false)}
         onConfirm={async () => { try { await apiFetch(`/knowledge-bases/${kb.id}`, { method: 'DELETE' }); toast('知识库已删除'); navigate('/knowledge'); } catch (caught) { toast(errorMessage(caught), 'error'); } }} />
     </div>
   );

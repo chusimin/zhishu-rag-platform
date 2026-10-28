@@ -43,7 +43,7 @@ export function ImportWizardPage() {
   const [items, setItems] = useState<Pending[]>([]);
   const [activeId, setActiveId] = useState('');
   const [text, setText] = useState({ title: '', content: '' });
-  const [web, setWeb] = useState({ url: '', title: '' });
+  const [web, setWeb] = useState({ url: '', title: '', method: 'heading' as ChunkMethod });
   const [previewing, setPreviewing] = useState(false);
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [importing, setImporting] = useState(false);
@@ -109,7 +109,7 @@ export function ImportWizardPage() {
   const running = uploads.some((upload) => upload.job && ACTIVE_STATUSES.has(upload.job.status));
   useEffect(() => {
     if (!running) return undefined;
-    const timer = window.setInterval(() => { void pollUploads(uploads).then(setUploads); }, 2000);
+    const timer = window.setInterval(() => { void pollUploads(uploads).then(setUploads).catch(() => undefined); }, 2000);
     return () => window.clearInterval(timer);
   }, [running, uploads, pollUploads]);
 
@@ -120,7 +120,7 @@ export function ImportWizardPage() {
     const results: Upload[] = [];
     if (source === 'web') {
       try {
-        const response = await apiFetch<{ file: ApiKnowledgeFile; job: ApiImportJob }>(`/knowledge-bases/${kbId}/web-import`, { method: 'POST', body: JSON.stringify({ url: web.url.trim(), title: web.title.trim() || null, chunk_config: defaultChunkConfig(kb, 'heading') }) });
+        const response = await apiFetch<{ file: ApiKnowledgeFile; job: ApiImportJob }>(`/knowledge-bases/${kbId}/web-import`, { method: 'POST', body: JSON.stringify({ url: web.url.trim(), title: web.title.trim() || null, chunk_config: defaultChunkConfig(kb, web.method) }) });
         results.push({ id: response.file.id, name: response.file.filename, job: response.job, fileStatus: response.file.status });
       } catch (caught) {
         results.push({ id: 'web', name: web.url, error: errorMessage(caught) });
@@ -169,7 +169,11 @@ export function ImportWizardPage() {
         {step === 1 ? <button className="btn primary" disabled={!canNext || source === 'feishu' || source === 'api'} onClick={() => setStep(source === 'web' ? 3 : 2)}>下一步</button> : null}
         {step === 2 ? <button className="btn primary" disabled={!!allProblems.length} onClick={() => setStep(3)}>下一步</button> : null}
         {step === 3 ? <button className="btn primary" onClick={() => void startImport()}><UploadCloud size={15} />开始导入</button> : null}
-        {done ? <button className="btn primary" onClick={() => navigate(`/knowledge/${kbId}`)}>返回数据集</button> : null}
+        {done ? <>
+          <button className="btn" onClick={() => { setItems([]); setUploads([]); setActiveId(''); setWeb({ url: '', title: '', method: 'heading' }); setStep(1); }}>继续导入</button>
+          {uploads.length > failed ? <button className="btn" onClick={() => navigate(`/knowledge/${kbId}/search`)}>去检索测试</button> : null}
+          <button className="btn primary" onClick={() => navigate(`/knowledge/${kbId}`)}>返回数据集</button>
+        </> : null}
       </div>
 
       {step === 1 ? (
@@ -197,7 +201,7 @@ export function ImportWizardPage() {
               <div className="card pad">
                 <Field label="标题" required><input className="input" value={text.title} onChange={(event) => setText({ ...text, title: event.target.value })} placeholder="例如：新品上市统一口径" /></Field>
                 <Field label="内容" required hint="支持 Markdown"><textarea className="textarea" style={{ minHeight: 220 }} value={text.content} onChange={(event) => setText({ ...text, content: event.target.value })} /></Field>
-                <button className="btn" disabled={!text.title.trim() || !text.content.trim()} onClick={() => { addFiles([new File([`# ${text.title.trim()}\n\n${text.content.trim()}\n`], `${text.title.trim()}.md`, { type: 'text/markdown' })]); setText({ title: '', content: '' }); }}><FileText size={15} />加入待导入列表</button>
+                <button className="btn" disabled={!text.title.trim() || !text.content.trim()} onClick={() => { addFiles([new File([`# ${text.title.trim()}\n\n${text.content.trim()}\n`], `${text.title.trim().replace(/[\\/:*?"<>|]+/g, '_')}.md`, { type: 'text/markdown' })]); setText({ title: '', content: '' }); }}><FileText size={15} />加入待导入列表</button>
               </div>
             ) : null}
             {source === 'web' ? (
@@ -206,6 +210,12 @@ export function ImportWizardPage() {
                 <div style={{ height: 12 }} />
                 <Field label="网页地址" required><input className="input" value={web.url} onChange={(event) => setWeb({ ...web, url: event.target.value })} placeholder="https://help.example.com/docs/article" /></Field>
                 <Field label="文档标题" hint="可选，默认读取网页标题"><input className="input" value={web.title} onChange={(event) => setWeb({ ...web, title: event.target.value })} /></Field>
+                <Field label="切块方式" hint="网页正文会转为 Markdown">
+                  <select className="select" value={web.method} onChange={(event) => setWeb({ ...web, method: event.target.value as ChunkMethod })}>
+                    {(['heading', 'recursive', 'fixed', 'parent_child'] as const).map((method) => <option key={method} value={method}>{METHOD_LABEL[method]}</option>)}
+                  </select>
+                </Field>
+                {items.length ? <Notice tone="warn">已添加的 {items.length} 个文件不会随网页一起导入；切回「本地文件」可继续导入它们。</Notice> : null}
               </div>
             ) : null}
             {source === 'api' ? (
@@ -288,7 +298,7 @@ export function ImportWizardPage() {
               <thead><tr><th>数据源</th><th>切块方式</th><th>预览分块</th><th style={{ width: 240 }}>{step === 4 ? '进度' : '状态'}</th></tr></thead>
               <tbody>
                 {source === 'web' ? (
-                  <tr><td><div className="row"><Globe size={16} color="#12b76a" />{web.title || web.url}</div></td><td><Tag tone="blue">{METHOD_LABEL.heading}</Tag></td><td>—</td><td><UploadState upload={uploads[0]} pending={step === 3} /></td></tr>
+                  <tr><td><div className="row"><Globe size={16} color="#12b76a" />{web.title || web.url}</div></td><td><Tag tone="blue">{METHOD_LABEL[web.method]}</Tag></td><td>—</td><td><UploadState upload={uploads[0]} pending={step === 3} /></td></tr>
                 ) : items.map((item, index) => (
                   <tr key={item.id}>
                     <td><div className="row"><FileText size={16} color="#3370ff" />{item.file.name}</div></td>

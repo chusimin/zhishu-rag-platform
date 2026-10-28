@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import type { ApiChunkConfig, ApiKnowledgeBase } from '../api/client';
 import { CHUNK_METHODS } from '../lib/knowledge';
 import { Field, Slider, Tag } from './ui';
@@ -36,7 +37,7 @@ export function ChunkConfigFields({ config, patch }: { config: ApiChunkConfig; p
       ) : null}
       {config.method === 'separator' ? (
         <Field label="分隔符" hint="每行一个；正则以 re: 开头，\n 表示换行">
-          <textarea className="textarea mono" style={{ minHeight: 80 }} value={config.separators.map((item) => item.replace(/\n/g, '\\n')).join('\n')} onChange={(event) => patch({ separators: event.target.value.split('\n').map((item) => item.replace(/\\n/g, '\n')).filter(Boolean) })} />
+          <SeparatorInput separators={config.separators} onChange={(separators) => patch({ separators })} />
           <div className="row wrap" style={{ marginTop: 6, gap: 6 }}>
             {[['空行', '\n\n'], ['句号', '。'], ['「第X条」', 're:(?=第[一二三四五六七八九十百]+条)'], ['## 标题', '## ']].map(([label, value]) => (
               <button type="button" key={label} className="tag" style={{ cursor: 'pointer' }} onClick={() => !config.separators.includes(value) && patch({ separators: [...config.separators, value] })}>+ {label}</button>
@@ -54,5 +55,19 @@ export function ChunkConfigFields({ config, patch }: { config: ApiChunkConfig; p
       {config.method === 'page' ? <p className="faint">PDF 每页一块并保留页码；其他格式按段落处理。</p> : null}
       {config.method === 'qa' ? <p className="faint">CSV / Excel 第一列为问题、第二列为答案，每行一个问答分块。</p> : null}
     </div>
+  );
+}
+
+const encode = (items: string[]) => items.map((item) => item.replace(/\n/g, '\\n')).join('\n');
+
+/** 分隔符每行一个。保留输入框原文（含空行），否则按回车新起的一行会被立即过滤掉。 */
+function SeparatorInput({ separators, onChange }: { separators: string[]; onChange: (separators: string[]) => void }) {
+  const [text, setText] = useState(() => encode(separators));
+  useEffect(() => {
+    setText((current) => (encode(current.split('\n').map((item) => item.replace(/\\n/g, '\n')).filter(Boolean)) === encode(separators) ? current : encode(separators)));
+  }, [separators]);
+  return (
+    <textarea className="textarea mono" style={{ minHeight: 80 }} value={text}
+      onChange={(event) => { setText(event.target.value); onChange(event.target.value.split('\n').map((item) => item.replace(/\\n/g, '\n')).filter(Boolean)); }} />
   );
 }
