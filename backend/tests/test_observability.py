@@ -275,3 +275,61 @@ async def test_single_file_can_be_rechunked_with_new_method(client: AsyncClient)
     assert {chunk["metadata_json"].get("chunk_method") for chunk in chunks} == {"heading"}
     # Retry without a body keeps the stored per-file configuration.
     assert (await client.post(f"/api/v1/knowledge-bases/{kb_id}/files/{file_id}/retry", headers=ADMIN)).status_code == 202
+
+
+async def test_business_user_sees_only_published_app_and_own_conversations(client: AsyncClient, db_session) -> None:
+    from app.models import DEFAULT_WORKSPACE_ID, Membership, User
+    from app.security import hash_password
+
+    model_id = await priced_mock_llm(client)
+    app_id = await content_app(client, model_id)
+    assert (await client.get(f"/api/v1/fde/apps/{app_id}", headers=USER)).status_code == 404
+
+    await client.post(f"/api/v1/fde/apps/{app_id}/versions", headers=ADMIN, json={"release_notes": "v1"})
+    assert (await client.post(f"/api/v1/fde/apps/{app_id}/publish", headers=ADMIN, json={})).status_code == 200
+    draft = (await client.get(f"/api/v1/fde/apps/{app_id}", headers=ADMIN)).json()["manifest"]
+    draft["system_prompt"] = "未发布的草稿提示词"
+    await client.put(f"/api/v1/fde/apps/{app_id}/manifest", headers=ADMIN, json={"manifest": draft})
+
+    user = User(email="biz@example.com", display_name="业务", password_hash=hash_password("biz-password-1"))
+    db_session.add(user)
+    await db_session.flush()
+    db_session.add(Membership(workspace_id=DEFAULT_WORKSPACE_ID, user_id=user.id, role="user"))
+    await db_session.commit()
+    token = (await client.post("/api/v1/auth/login", json={"email": "biz@example.com", "password": "biz-password-1"})).json()["token"]
+    biz = {"Authorization": f"Bearer {token}"}
+
+    visible = await client.get(f"/api/v1/fde/apps/{app_id}", headers=biz)
+    assert visible.status_code == 200
+    assert visible.json()["manifest"]["system_prompt"] != "未发布的草稿提示词"
+    assert len(visible.json()["versions"]) == 1
+
+    ran = await client.post(f"/api/v1/fde/apps/{app_id}/run", headers=biz, json={"input_values": content_inputs()})
+    assert ran.status_code == 200, ran.text
+    assert (await client.post(f"/api/v1/fde/apps/{app_id}/preview", headers=ADMIN, json={"input_values": content_inputs()})).status_code == 200
+
+    mine = (await client.get(f"/api/v1/fde/apps/{app_id}/my-conversations", headers=biz)).json()
+    assert [item["id"] for item in mine] == [ran.json()["conversation_id"]]
+    detail = await client.get(f"/api/v1/fde/conversations/{ran.json()['conversation_id']}", headers=biz)
+    assert [item["role"] for item in detail.json()["messages"]] == ["user", "assistant"]
+    runs = (await client.get("/api/v1/observability/runs", headers=ADMIN, params={"channel": "web"})).json()["items"]
+    assert runs[0]["app_version"] == 1
+
+
+async def test_public_share_does_not_leak_private_configuration(client: AsyncClient) -> None:
+    model_id = await priced_mock_llm(client)
+    app_id = await content_app(client, model_id)
+    await client.post(f"/api/v1/fde/apps/{app_id}/versions", headers=ADMIN, json={"release_notes": "v1"})
+    await client.post(f"/api/v1/fde/apps/{app_id}/publish", headers=ADMIN, json={})
+    share = await client.post(f"/api/v1/fde/apps/{app_id}/shares", headers=ADMIN, json={"name": "外部", "expires_in_days": 7, "max_uses": None})
+    token = share.json()["token"]
+    public = (await client.get(f"/api/v1/fde/share/{token}")).json()
+    for manifest in (public["manifest"], public["published_version"]["manifest"]):
+        assert manifest["system_prompt"] == ""
+        assert manifest["llm_model_id"] is None
+        assert manifest["tools"] == []
+        assert manifest["input_fields"], "form fields are still needed to render the page"
+    ran = await client.post(f"/api/v1/fde/share/{token}/run", json={"input_values": content_inputs()})
+    assert ran.status_code == 200, ran.text
+    runs = (await client.get("/api/v1/observability/runs", headers=ADMIN, params={"channel": "share"})).json()["items"]
+    assert runs[0]["trace_id"] == ran.json()["trace_id"]

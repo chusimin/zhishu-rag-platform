@@ -18,6 +18,7 @@ const manifest: AppManifest = {
   memory: { enabled: false, max_turns: 10 },
   delivery: { channel: 'web', show_citations: false, allow_copy: true, allow_export: false },
   agent: { max_steps: 8, require_confirmation_for_side_effects: true, show_tool_steps: true, long_term_memory: false, knowledge_mode: 'tool' },
+  experience: { opening: '', suggestions: [] },
 };
 
 afterEach(() => vi.unstubAllGlobals());

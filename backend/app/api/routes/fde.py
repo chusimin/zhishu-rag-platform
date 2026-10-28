@@ -251,7 +251,49 @@ async def list_apps(context: AuthContext = Depends(get_auth_context), session: A
 
 @router.get("/apps/{app_id}")
 async def get_app(app_id: str, context: AuthContext = Depends(get_auth_context), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
-    return _app_payload(await _app(session, app_id, context.workspace_id))
+    app = await _app(session, app_id, context.workspace_id)
+    if context.role != "user":
+        return _app_payload(app)
+    # 业务使用者只能看到已发布版本，不暴露草稿与版本历史。
+    if not app.is_enabled or not app.published_version_id:
+        raise HTTPException(status_code=404, detail="应用尚未发布")
+    payload = _app_payload(app)
+    published = payload["published_version"]
+    return {**payload, "manifest": published["manifest"], "draft_manifest": published["manifest"], "versions": [published]}
+
+
+def _conversation_scope(context: AuthContext) -> list[Any]:
+    filters: list[Any] = [Conversation.workspace_id == context.workspace_id]
+    if context.role == "user" or context.user_id:
+        filters.append(Conversation.user_id == context.user_id)
+    return filters
+
+
+@router.get("/apps/{app_id}/my-conversations")
+async def my_conversations(app_id: str, context: AuthContext = Depends(get_auth_context), session: AsyncSession = Depends(get_session)) -> list[dict[str, Any]]:
+    # 编排页调试产生的会话不出现在业务端历史中
+    online = select(QueryLog.id).where(QueryLog.conversation_id == Conversation.id, QueryLog.channel != "debug").exists()
+    rows = await session.scalars(
+        select(Conversation).where(Conversation.app_id == app_id, online, *_conversation_scope(context)).order_by(Conversation.updated_at.desc()).limit(30)
+    )
+    return [{"id": item.id, "title": item.title, "updated_at": item.updated_at} for item in rows]
+
+
+@router.get("/conversations/{conversation_id}")
+async def my_conversation(conversation_id: str, context: AuthContext = Depends(get_auth_context), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    conversation = await session.scalar(select(Conversation).where(Conversation.id == conversation_id, *_conversation_scope(context)))
+    if not conversation:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    messages = list(await session.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at)))
+    return {
+        "id": conversation.id,
+        "app_id": conversation.app_id,
+        "title": conversation.title,
+        "messages": [
+            {"id": item.id, "role": item.role, "content": item.content, "citations": item.citations, "input_values": item.input_values, "created_at": item.created_at}
+            for item in messages
+        ],
+    }
 
 
 @router.post("/apps/{app_id}/duplicate", status_code=201)
@@ -549,10 +591,18 @@ async def _public_share(token: str, session: AsyncSession) -> tuple[AppShare, QA
     return share, app, version
 
 
+def _public_manifest(manifest: Manifest) -> dict[str, Any]:
+    """匿名访问只需要渲染界面的字段，不暴露提示词、模型、知识库与工具配置。"""
+    data = manifest.model_dump(mode="json")
+    data.update(system_prompt="", llm_model_id=None, knowledge_base_ids=[], tools=[])
+    data["guardrails"] = {**data["guardrails"], "blocked_topics": []}
+    return data
+
+
 @router.get("/share/{token}")
 async def get_public_share(token: str, session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     _share, app, version = await _public_share(token, session)
-    manifest = Manifest.model_validate(version.manifest)
+    public = _public_manifest(Manifest.model_validate(version.manifest))
     return {
         "id": app.id,
         "name": app.name,
@@ -560,9 +610,9 @@ async def get_public_share(token: str, session: AsyncSession = Depends(get_sessi
         "scenario_type": app.scenario_type,
         "status": "published",
         "is_enabled": True,
-        "manifest": manifest.model_dump(mode="json"),
+        "manifest": public,
         "published_version_id": version.id,
-        "published_version": _version_payload(version),
+        "published_version": {**_version_payload(version), "manifest": public},
         "versions": [],
         "portal_path": f"/share/{token}",
         "updated_at": app.updated_at,

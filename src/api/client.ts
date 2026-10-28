@@ -112,6 +112,7 @@ export interface ApiToolConfig {
     auth_header?: string;
     allow_private_network?: boolean;
     timeout_seconds?: number;
+    side_effect?: boolean;
   };
   has_secret: boolean;
   is_enabled: boolean;

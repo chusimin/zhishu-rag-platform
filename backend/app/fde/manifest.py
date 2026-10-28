@@ -102,6 +102,17 @@ class Delivery(FDEModel):
     allow_export: bool = False
 
 
+class Experience(FDEModel):
+    opening: str = Field(default="", max_length=1000)
+    suggestions: list[str] = Field(default_factory=list, max_length=8)
+
+    @model_validator(mode="after")
+    def validate_suggestions(self) -> "Experience":
+        if any(not item or len(item) > 120 for item in self.suggestions):
+            raise ValueError("suggestions must contain between 1 and 120 characters")
+        return self
+
+
 class Manifest(FDEModel):
     schema_version: Literal["fde.app/v1", "fde.app/v2"] = MANIFEST_SCHEMA_VERSION
     type: Literal["simple", "agent"] = "simple"
@@ -119,6 +130,7 @@ class Manifest(FDEModel):
     memory: Memory = Field(default_factory=Memory)
     delivery: Delivery = Field(default_factory=Delivery)
     agent: AgentSettings = Field(default_factory=AgentSettings)
+    experience: Experience = Field(default_factory=Experience)
 
     @model_validator(mode="after")
     def validate_unique_entries(self) -> "Manifest":

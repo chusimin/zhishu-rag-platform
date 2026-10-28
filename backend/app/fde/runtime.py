@@ -92,6 +92,7 @@ async def _agent_answer(
     tools: list[StructuredTool] = []
     side_effects: dict[str, bool] = {}
     tool_kinds: dict[str, str] = {}
+    tool_labels: dict[str, str] = {KNOWLEDGE_TOOL: "知识库检索", HANDOFF_TOOL: "转人工"}
     for reference in references:
         config = by_id[reference.tool_id or ""]
 
@@ -107,6 +108,7 @@ async def _agent_answer(
         ))
         side_effects[reference.name] = bool(config.config.get("side_effect", False))
         tool_kinds[reference.name] = "tool"
+        tool_labels[reference.name] = config.name
 
     if knowledge_search is not None:
         async def search(query: str) -> str:
@@ -195,9 +197,9 @@ async def _agent_answer(
                     status = "error"
             duration = int((monotonic() - started) * 1000)
             kind = tool_kinds.get(name, "tool")
-            label = "知识库检索" if kind == "retrieval" else "转人工" if kind == "handoff" else f"工具 · {name}"
-            _span(spans, kind, label, duration_ms=duration, status=status, detail=result[:2000], tool=name, arguments=arguments, step=step_number)
-            steps.append({"step": step_number, "tool": name, "kind": kind, "arguments": arguments, "status": status, "result": result[:4000], "duration_ms": duration})
+            label = tool_labels.get(name, name)
+            _span(spans, kind, label if kind != "tool" else f"工具 · {label}", duration_ms=duration, status=status, detail=result[:2000], tool=name, label=label, arguments=arguments, step=step_number)
+            steps.append({"step": step_number, "tool": name, "label": label, "kind": kind, "arguments": arguments, "status": status, "result": result[:4000], "duration_ms": duration})
             messages.append(ToolMessage(content=result[:12000], tool_call_id=call_id, name=name))
     _span(spans, "harness", "达到最大推理步数", status="error", detail=f"max_steps={manifest.agent.max_steps}")
     raise ValueError(f"Agent 已达到最大推理步数 {manifest.agent.max_steps}，未能生成最终回答")

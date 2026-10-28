@@ -30,6 +30,7 @@ export type AppManifest = {
   memory: { enabled: boolean; max_turns: number };
   delivery: { channel: 'web' | 'api' | 'both'; show_citations: boolean; allow_copy: boolean; allow_export: boolean };
   agent: { max_steps: number; require_confirmation_for_side_effects: boolean; show_tool_steps: boolean; long_term_memory: boolean; knowledge_mode: 'tool' | 'always' };
+  experience: { opening: string; suggestions: string[] };
 };
 
 export type AppTemplate = {
@@ -73,7 +74,7 @@ export type RunResult = {
   simulated: boolean;
   output_json: unknown;
   handoff: boolean;
-  agent_steps: Array<{ step: number; tool: string; kind?: 'tool' | 'retrieval' | 'handoff'; arguments: Record<string, unknown>; status: string; result: string; duration_ms?: number }>;
+  agent_steps: Array<{ step: number; tool: string; label?: string; kind?: 'tool' | 'retrieval' | 'handoff'; arguments: Record<string, unknown>; status: string; result: string; duration_ms?: number }>;
   model?: { id: string; name: string; display_name: string; provider: string; simulated: boolean };
   trace_id: string;
   conversation_id: string;
@@ -110,5 +111,7 @@ export const fdeApi = {
   runShare: (token: string, payload: { message?: string; input_values: Record<string, unknown>; conversation_id?: string; confirmed_tool_names?: string[] }) => apiFetch<RunResult>(`/fde/share/${encodeURIComponent(token)}/run`, { method: 'POST', body: JSON.stringify(payload) }),
   saveSuite: (id: string, name: string, cases: EvaluationCase[]) => apiFetch<{ id: string; case_count: number }>(`/fde/apps/${id}/evaluation-suite`, { method: 'PUT', body: JSON.stringify({ name, cases: cases.map(({ name: caseName, ...item }) => ({ ...item, name: caseName })) }) }),
   evaluate: (id: string) => apiFetch<{ status: string; passed_count: number; failed_count: number; simulated: boolean; results: EvaluationResult[] }>(`/fde/apps/${id}/evaluate`, { method: 'POST' }),
+  myConversations: (id: string) => apiFetch<Array<{ id: string; title: string; updated_at: string }>>(`/fde/apps/${id}/my-conversations`),
+  conversation: (id: string) => apiFetch<{ id: string; app_id: string; title: string; messages: Array<{ id: string; role: 'user' | 'assistant'; content: string; citations: Citation[]; input_values: Record<string, unknown>; created_at: string }> }>(`/fde/conversations/${id}`),
   feedback: (messageId: string, rating: 1 | -1, comment = '') => apiFetch<{ ok: boolean }>(`/fde/messages/${messageId}/feedback`, { method: 'POST', body: JSON.stringify({ rating, comment }) }),
 };
