@@ -467,7 +467,7 @@ async def _publish(app: QAApp, version_id: str | None, context: AuthContext, ses
         )
         for suite in gate_suites:
             latest = await session.scalar(select(EvaluationRun).where(EvaluationRun.suite_id == suite.id).order_by(EvaluationRun.created_at.desc()).limit(1))
-            case_count = await session.scalar(select(func.count()).select_from(EvaluationCase).where(EvaluationCase.suite_id == suite.id)) or 0
+            case_count = await session.scalar(select(func.count()).select_from(EvaluationCase).where(EvaluationCase.suite_id == suite.id, EvaluationCase.readiness == "ready")) or 0
             if not latest or latest.failed_count or latest.passed_count < case_count:
                 raise HTTPException(status_code=409, detail=f"发布质量门禁未通过：请先运行评测集「{suite.name}」并确保全部通过")
             if latest.manifest_hash != manifest_fingerprint(version.manifest):

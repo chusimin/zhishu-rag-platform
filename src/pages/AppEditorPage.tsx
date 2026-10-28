@@ -169,7 +169,7 @@ function PublishModal({ open, app, onClose, onPublished }: { open: boolean; app:
 
   const errors = issues?.filter((item) => item.severity === 'error') ?? [];
   const warnings = issues?.filter((item) => item.severity === 'warning') ?? [];
-  const gatePassed = (set: ApiEvaluationSet) => !!set.latest_run && !set.latest_run.failed_count && set.latest_run.passed_count >= set.case_count && set.latest_run.matches_draft !== false;
+  const gatePassed = (set: ApiEvaluationSet) => !!set.latest_run && !set.latest_run.failed_count && set.latest_run.passed_count >= set.ready_count && set.latest_run.matches_draft !== false;
   const gateBlocked = gates.some((set) => !gatePassed(set));
   const nextVersion = (app.versions[0]?.version ?? 0) + 1;
 
@@ -202,7 +202,7 @@ function PublishModal({ open, app, onClose, onPublished }: { open: boolean; app:
           return (
             <div key={set.id} className="row" style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', marginBottom: 6 }}>
               {passed ? <CheckCircle2 size={16} color="#12b76a" /> : <AlertTriangle size={16} color="#f79009" />}
-              <span className="grow">{set.name}<span className="faint"> · {!run ? '尚未运行' : stale ? '草稿已修改，需重新运行' : `最近 ${run.passed_count}/${set.case_count} 通过`}</span></span>
+              <span className="grow">{set.name}<span className="faint"> · {!run ? '尚未运行' : stale ? '草稿已修改，需重新运行' : `最近 ${run.passed_count}/${set.ready_count} 通过${set.needs_standard_count ? `（${set.needs_standard_count} 条待补标准未计入）` : ''}`}</span></span>
               {!passed ? <button className="btn sm" onClick={() => navigate(`/evaluation-sets?set=${set.id}`)}>去运行</button> : null}
             </div>
           );

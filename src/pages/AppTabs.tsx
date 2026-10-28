@@ -141,7 +141,7 @@ export function EvalTab({ app }: { app: FDEApp }) {
                 <td>{set.case_count}{set.needs_standard_count ? <Tag tone="orange">{set.needs_standard_count} 待补标准</Tag> : null}</td>
                 <td>{run ? (run.failed_count ? <Tag tone="red"><XCircle size={12} />{run.passed_count}/{run.passed_count + run.failed_count} 通过</Tag> : <Tag tone="green"><CheckCircle2 size={12} />全部通过</Tag>) : <span className="faint">未运行</span>}{run?.matches_draft === false ? <Tag tone="orange">草稿已改动，需重跑</Tag> : null}{run ? <div className="faint">{formatTime(run.created_at)}</div> : null}</td>
                 <td><Switch on={set.is_release_gate} label="发布门禁" onChange={async (value) => { try { await evalApi.update(set.id, { is_release_gate: value }); toast(value ? '已设为发布门禁' : '已取消门禁'); void load(); } catch (caught) { toast(errorMessage(caught), 'error'); } }} /></td>
-                <td><button className="btn sm" disabled={running === set.id || !set.case_count || set.needs_standard_count > 0} title={set.needs_standard_count ? '有 Case 待补标准' : undefined} onClick={() => void runSet(set)}>{running === set.id ? <Spinner size={12} /> : <Play size={13} />}运行</button></td>
+                <td><button className="btn sm" disabled={running === set.id || !set.ready_count} title={!set.ready_count ? '没有可运行的 Case' : set.needs_standard_count ? `${set.needs_standard_count} 条待补标准的 Case 会被跳过` : undefined} onClick={() => void runSet(set)}>{running === set.id ? <Spinner size={12} /> : <Play size={13} />}运行</button></td>
               </tr>
             );
           })}</tbody>

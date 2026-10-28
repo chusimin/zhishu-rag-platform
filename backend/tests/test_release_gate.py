@@ -75,3 +75,14 @@ async def test_release_is_atomic_and_reuses_unchanged_version(client: AsyncClien
     again = await client.post(f"/api/v1/fde/apps/{app_id}/release", headers=ADMIN, json={"release_notes": "无改动"})
     assert again.status_code == 200
     assert [item["version"] for item in again.json()["versions"]] == [1]
+
+
+async def test_cases_waiting_for_standards_do_not_block_run_or_gate(client: AsyncClient) -> None:
+    app_id = await content_app(client, await priced_mock_llm(client))
+    suite_id = await _gate_suite(client, app_id, "门禁", 1)
+    pending = await client.post(f"/api/v1/evaluation-sets/{suite_id}/cases", headers=ADMIN, json={"name": "待补", "message": "写一段文案", "input_values": content_inputs()})
+    assert pending.json()["readiness"] == "needs_standard"
+    ran = await client.post(f"/api/v1/evaluation-sets/{suite_id}/run", headers=ADMIN)
+    assert ran.status_code == 200, ran.text
+    assert ran.json()["passed_count"] == 1 and ran.json()["failed_count"] == 0
+    assert await _publish(client, app_id) == 200

@@ -452,14 +452,15 @@ async def run_evaluation_set(
     suite, app = await _suite(session, suite_id, context.workspace_id, with_cases=True)
     if not suite.cases:
         raise HTTPException(status_code=422, detail="评测集还没有 Case")
-    pending = [item for item in suite.cases if item.readiness != "ready"]
-    if pending:
-        raise HTTPException(status_code=409, detail=f"还有 {len(pending)} 个 Case 待补评测标准")
+    # 待补标准的 Case 不参与本次运行，也不计入发布门禁；全部待补时才拒绝运行
+    ready_cases = [item for item in suite.cases if item.readiness == "ready"]
+    if not ready_cases:
+        raise HTTPException(status_code=409, detail=f"{len(suite.cases)} 个 Case 都待补评测标准，补齐后才能运行")
 
     manifest = Manifest.model_validate(app.draft_manifest) if app.draft_manifest else manifest_from_qa_app(app)
     run = EvaluationRun(suite_id=suite.id, status=RunStatus.RUNNING, manifest_hash=manifest_fingerprint(manifest))
     results: list[dict[str, Any]] = []
-    for case in suite.cases:
+    for case in ready_cases:
         reasons: list[str] = []
         try:
             input_values = dict(case.input_values)

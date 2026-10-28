@@ -32,12 +32,13 @@ export function EvaluationSetsPage() {
       const [loaded, loadedApps] = await Promise.all([evalApi.list(), fdeApi.list()]);
       setSets(loaded);
       setApps(loadedApps);
-      setCreateForm((current) => ({ ...current, app_id: current.app_id || loadedApps[0]?.id || '' }));
-      if (!selectedId && loaded[0]) setParams({ set: loaded[0].id }, { replace: true });
+      setCreateForm((current) => ({ ...current, app_id: current.app_id || loadedApps.find((app) => app.status !== 'archived')?.id || '' }));
+      // 首次进入未指定评测集时默认选中第一个；只在列表加载时判断，切换评测集不会重新拉列表
+      setParams((current) => (current.get('set') || !loaded[0] ? current : new URLSearchParams({ set: loaded[0].id })), { replace: true });
     } catch (caught) {
       setError(errorMessage(caught));
     }
-  }, [selectedId, setParams]);
+  }, [setParams]);
 
   const loadDetail = useCallback(async () => {
     if (!selectedId) { setDetail(null); return; }
@@ -73,7 +74,7 @@ export function EvaluationSetsPage() {
       <Modal open={creating} title="新建评测集" onClose={() => setCreating(false)} footer={<><button className="btn" onClick={() => setCreating(false)}>取消</button><button className="btn primary" disabled={!createForm.app_id || !createForm.name.trim()} onClick={async () => {
         try { const set = await evalApi.create({ ...createForm, name: createForm.name.trim() }); setCreating(false); setCreateForm({ ...createForm, name: '', description: '' }); await loadList(); setParams({ set: set.id }); toast('评测集已创建'); } catch (caught) { toast(errorMessage(caught), 'error'); }
       }}>创建</button></>}>
-        <Field label="绑定应用" required hint="评测集运行该应用的当前草稿"><select className="select" value={createForm.app_id} onChange={(event) => setCreateForm({ ...createForm, app_id: event.target.value })}>{apps.map((app) => <option key={app.id} value={app.id}>{app.name}</option>)}</select></Field>
+        <Field label="绑定应用" required hint="评测集运行该应用的当前草稿"><select className="select" value={createForm.app_id} onChange={(event) => setCreateForm({ ...createForm, app_id: event.target.value })}>{apps.filter((app) => app.status !== 'archived').map((app) => <option key={app.id} value={app.id}>{app.name}</option>)}</select></Field>
         <Field label="名称" required><input className="input" value={createForm.name} placeholder="例如：售后政策回归集" onChange={(event) => setCreateForm({ ...createForm, name: event.target.value })} /></Field>
         <Field label="说明"><textarea className="textarea" style={{ minHeight: 60 }} value={createForm.description} onChange={(event) => setCreateForm({ ...createForm, description: event.target.value })} /></Field>
       </Modal>
@@ -117,7 +118,7 @@ function SetDetail({ set, onChanged }: { set: ApiEvaluationSet; onChanged: () =>
         </div>
         <label className="row faint" style={{ fontSize: 13 }}>发布门禁<Switch on={set.is_release_gate} label="发布门禁" onChange={async (value) => { try { await evalApi.update(set.id, { is_release_gate: value }); toast(value ? '已设为发布门禁：最近一次评测全部通过才能发布' : '已取消门禁'); await onChanged(); } catch (caught) { toast(errorMessage(caught), 'error'); } }} /></label>
         <button className="btn" onClick={() => setAdding(true)}><Plus size={15} />新增 Case</button>
-        <button className="btn primary" disabled={running || !cases.length || set.needs_standard_count > 0} title={set.needs_standard_count ? '有 Case 待补标准' : undefined} onClick={() => void run()}>{running ? <Spinner /> : <Play size={15} />}{running ? '运行中' : '运行评测'}</button>
+        <button className="btn primary" disabled={running || !set.ready_count} title={!set.ready_count ? '没有可运行的 Case' : set.needs_standard_count ? `${set.needs_standard_count} 条待补标准的 Case 不参与本次运行` : undefined} onClick={() => void run()}>{running ? <Spinner /> : <Play size={15} />}{running ? '运行中' : '运行评测'}</button>
       </div>
 
       <div className="grid c4" style={{ marginBottom: 16 }}>
@@ -126,7 +127,9 @@ function SetDetail({ set, onChanged }: { set: ApiEvaluationSet; onChanged: () =>
         <div className="card stat"><div className="label">待补标准</div><div className="value" style={{ color: set.needs_standard_count ? '#b54708' : undefined }}>{set.needs_standard_count}</div></div>
         <div className="card stat"><div className="label">最近通过率</div><div className="value" style={{ color: lastRun ? (lastRun.failed_count ? 'var(--red)' : 'var(--green)') : undefined }}>{lastRun ? `${Math.round((lastRun.passed_count / Math.max(1, lastRun.passed_count + lastRun.failed_count)) * 100)}%` : '—'}</div>{lastRun ? <div className="faint">{formatTime(lastRun.created_at)}{lastRun.simulated ? ' · 含测试替身' : ''}</div> : null}</div>
       </div>
-      {set.needs_standard_count ? <div style={{ marginBottom: 12 }}><Notice tone="warn" title={`${set.needs_standard_count} 条 Case 待补标准`}>Bad Case 需要填写期望输出、必须包含 / 禁止出现的关键词或引用要求后才能参与评测；补齐前评测集不可运行。</Notice></div> : null}
+      {running ? <div style={{ marginBottom: 12 }}><Notice tone="info" title={`正在运行 ${set.ready_count} 条 Case`}>每条 Case 都会真实调用一次应用，耗时取决于模型速度，请保持页面打开。</Notice></div> : null}
+      {lastRun?.matches_draft === false ? <div style={{ marginBottom: 12 }}><Notice tone="warn" title="应用草稿在最近一次评测后有改动">结果仅供参考；作为发布门禁时需要重新运行。</Notice></div> : null}
+      {set.needs_standard_count ? <div style={{ marginBottom: 12 }}><Notice tone="warn" title={`${set.needs_standard_count} 条 Case 待补标准`}>Bad Case 需要填写期望输出、必须包含 / 禁止出现的关键词或引用要求后才会参与评测。运行时会跳过它们，也不计入发布门禁。</Notice></div> : null}
 
       <div className="row" style={{ marginBottom: 10 }}>
         <div className="seg">

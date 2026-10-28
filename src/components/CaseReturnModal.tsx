@@ -58,7 +58,7 @@ export function CaseReturnModal({ value, onClose, onDone }: { value: CaseReturn 
       </Field>
       {target === '__new__' ? <Field label="新评测集名称" required><input className="input" value={newName} onChange={(event) => setNewName(event.target.value)} /></Field> : null}
       <Field label="标签" hint="逗号分隔"><input className="input" value={tags} onChange={(event) => setTags(event.target.value)} /></Field>
-      {type === 'bad' ? <Notice tone="warn">Bad Case 回流后为「待补标准」，补齐期望输出或判定规则后才会参与自动评测。</Notice> : null}
+      {type === 'bad' ? <Notice tone="warn">Bad Case 回流后为「待补标准」，补齐期望输出或判定规则后才会参与自动评测；在此之前不影响评测运行和发布门禁。</Notice> : null}
     </Modal>
   );
 }
