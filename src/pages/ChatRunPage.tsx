@@ -17,9 +17,11 @@ export function ChatRunPage() {
   const [history, setHistory] = useState<Array<{ id: string; title: string; updated_at: string }>>([]);
   const [current, setCurrent] = useState<Conversation | null>(null);
   const [session, setSession] = useState(0);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [error, setError] = useState('');
+  const [historyError, setHistoryError] = useState('');
 
-  const loadHistory = useCallback(() => fdeApi.myConversations(appId).then(setHistory).catch(() => undefined), [appId]);
+  const loadHistory = useCallback(() => fdeApi.myConversations(appId).then((list) => { setHistory(list); setHistoryError(''); }).catch((caught) => setHistoryError(errorMessage(caught))), [appId]);
   useEffect(() => { fdeApi.get(appId).then(setApp).catch((caught) => setError(errorMessage(caught))); void loadHistory(); }, [appId, loadHistory]);
 
   if (error) return <div className="page"><Notice tone="error" title="无法打开应用">{error}</Notice></div>;
@@ -37,14 +39,15 @@ export function ChatRunPage() {
           <div className="grow"><strong style={{ display: 'block' }}>{app.name}</strong><span className="faint">v{published.version}</span></div>
         </div>
         <p className="faint" style={{ padding: '0 6px 12px' }}>{app.description}</p>
-        <button className="btn" style={{ margin: '0 4px 12px' }} onClick={() => { setCurrent(null); setSession((value) => value + 1); }}><MessageSquarePlus size={15} />新对话</button>
+        <button className="btn" style={{ margin: '0 4px 12px' }} onClick={() => { setCurrent(null); setActiveId(null); setSession((value) => value + 1); }}><MessageSquarePlus size={15} />新对话</button>
         <div className="faint" style={{ padding: '0 6px 4px' }}>我的历史对话</div>
         {history.length ? history.map((item) => (
-          <button key={item.id} className={`sub-link ${current?.id === item.id ? 'active' : ''}`} style={{ fontSize: 13, flexDirection: 'column', alignItems: 'flex-start', gap: 0 }}
-            onClick={async () => { try { setCurrent(await fdeApi.conversation(item.id)); setSession((value) => value + 1); } catch (caught) { setError(errorMessage(caught)); } }}>
+          <button key={item.id} className={`sub-link ${activeId === item.id ? 'active' : ''}`} style={{ fontSize: 13, flexDirection: 'column', alignItems: 'flex-start', gap: 0 }}
+            onClick={async () => { try { setCurrent(await fdeApi.conversation(item.id)); setActiveId(item.id); setSession((value) => value + 1); } catch (caught) { setHistoryError(errorMessage(caught)); } }}>
             <span className="ellipsis" style={{ width: '100%' }}>{item.title}</span><span className="faint">{formatTime(item.updated_at)}</span>
           </button>
-        )) : <span className="faint" style={{ padding: '0 6px' }}>暂无</span>}
+        )) : historyError ? null : <span className="faint" style={{ padding: '0 6px' }}>暂无</span>}
+        {historyError ? <div style={{ padding: '6px 4px' }}><Notice tone="error" action={<button className="btn sm" onClick={() => void loadHistory()}>重试</button>}>历史对话加载失败：{historyError}</Notice></div> : null}
       </aside>
       <section style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column' }}>
         <div className="row" style={{ padding: '12px 20px', borderBottom: '1px solid var(--border)' }}>
@@ -53,7 +56,7 @@ export function ChatRunPage() {
           {isManager(me?.role) ? <Link to={`/apps/${app.id}`} className="btn sm ghost"><Pencil size={13} />编排</Link> : null}
         </div>
         <div style={{ flex: 1, minHeight: 0 }}>
-          <ChatPanel key={session} appId={app.id} manifest={manifest} mode="run" initialConversation={current} onConversation={() => void loadHistory()} />
+          <ChatPanel key={session} appId={app.id} manifest={manifest} mode="run" initialConversation={current} onConversation={(id) => { setActiveId(id); void loadHistory(); }} />
         </div>
       </section>
     </div>
