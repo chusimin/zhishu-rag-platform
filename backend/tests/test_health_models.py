@@ -14,6 +14,23 @@ async def test_health_reports_database(client: AsyncClient) -> None:
     assert response.json()["database"] == "ok"
 
 
+async def test_development_cors_allows_local_private_network_preflight(client: AsyncClient) -> None:
+    response = await client.options(
+        "/api/v1/fde/apps",
+        headers={
+            # Chromium Local Network Access currently serializes the
+            # preflight Origin without the Vite development-server port.
+            "Origin": "http://127.0.0.1",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "x-demo-role",
+            "Access-Control-Request-Private-Network": "true",
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.headers["access-control-allow-origin"] == "http://127.0.0.1"
+    assert response.headers["access-control-allow-private-network"] == "true"
+
+
 async def test_model_configuration_encrypts_key_and_never_returns_plaintext(
     client: AsyncClient,
     db_session: AsyncSession,

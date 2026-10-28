@@ -33,6 +33,7 @@ async def test_retrieval(
             top_k=payload.top_k,
             rerank_top_n=payload.rerank_top_n,
             score_threshold=payload.score_threshold,
+            mode=payload.mode,
         )
     except (ProviderError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

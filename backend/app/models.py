@@ -65,8 +65,14 @@ class RunStatus(StrEnum):
 
 class ChunkMethod(StrEnum):
     RECURSIVE = "recursive"
+    HEADING = "heading"
+    SEPARATOR = "separator"
+    FIXED = "fixed"
     PARENT_CHILD = "parent_child"
     SEMANTIC = "semantic"
+    PAGE = "page"
+    TABLE_ROW = "table_row"
+    QA = "qa"
 
 
 class AppScenario(StrEnum):
@@ -151,6 +157,7 @@ class KnowledgeFile(Base, TimestampMixin):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    chunk_config: Mapped[dict[str, Any]] = mapped_column(SAJSON, default=dict, nullable=False)
     document_metadata: Mapped[dict[str, Any]] = mapped_column(SAJSON, default=dict, nullable=False)
 
     knowledge_base: Mapped[KnowledgeBase] = relationship(back_populates="files")
@@ -347,9 +354,23 @@ class AppVersion(Base):
     app_id: Mapped[str] = mapped_column(ForeignKey("qa_apps.id", ondelete="CASCADE"), nullable=False, index=True)
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     manifest: Mapped[dict[str, Any]] = mapped_column(SAJSON, nullable=False)
+    release_notes: Mapped[str] = mapped_column(Text, default="", nullable=False)
     created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utc_now, nullable=False)
     app: Mapped[QAApp] = relationship(back_populates="versions")
+
+
+class AppShare(Base, TimestampMixin):
+    __tablename__ = "app_shares"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    app_id: Mapped[str] = mapped_column(ForeignKey("qa_apps.id", ondelete="CASCADE"), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(120), default="公开分享", nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False, index=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    max_uses: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    use_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
 
 class EvaluationSuite(Base, TimestampMixin):
@@ -358,11 +379,17 @@ class EvaluationSuite(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     app_id: Mapped[str] = mapped_column(ForeignKey("qa_apps.id", ondelete="CASCADE"), nullable=False, index=True)
     name: Mapped[str] = mapped_column(String(180), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    is_release_gate: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     cases: Mapped[list[EvaluationCase]] = relationship(back_populates="suite", cascade="all, delete-orphan")
 
 
 class EvaluationCase(Base, TimestampMixin):
     __tablename__ = "evaluation_cases"
+    __table_args__ = (
+        UniqueConstraint("suite_id", "source_trace_id", name="uq_evaluation_case_suite_source_trace"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     suite_id: Mapped[str] = mapped_column(ForeignKey("evaluation_suites.id", ondelete="CASCADE"), nullable=False, index=True)
@@ -372,6 +399,18 @@ class EvaluationCase(Base, TimestampMixin):
     expected_keywords: Mapped[list[str]] = mapped_column(SAJSON, default=list, nullable=False)
     forbidden_keywords: Mapped[list[str]] = mapped_column(SAJSON, default=list, nullable=False)
     require_citations: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    case_type: Mapped[str] = mapped_column(String(16), default="manual", nullable=False, index=True)
+    readiness: Mapped[str] = mapped_column(String(24), default="ready", nullable=False, index=True)
+    actual_output: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    expected_output: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    tags: Mapped[list[str]] = mapped_column(SAJSON, default=list, nullable=False)
+    source_log_id: Mapped[str | None] = mapped_column(
+        ForeignKey("query_logs.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    source_trace_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    source_conversation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    source_snapshot: Mapped[dict[str, Any]] = mapped_column(SAJSON, default=dict, nullable=False)
+    created_by: Mapped[str | None] = mapped_column(String(36), nullable=True)
     suite: Mapped[EvaluationSuite] = relationship(back_populates="cases")
 
 
@@ -406,7 +445,11 @@ class ToolConfig(Base, TimestampMixin, WorkspaceMixin):
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="", nullable=False)
     config: Mapped[dict[str, Any]] = mapped_column(SAJSON, default=dict, nullable=False)
+    secret_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    connection_status: Mapped[str] = mapped_column(String(24), default=ConnectionStatus.UNTESTED, nullable=False)
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class AuditEvent(Base):

@@ -7,6 +7,7 @@ import {
   KeyRound,
   LayoutDashboard,
   MessagesSquare,
+  FlaskConical,
   MoreHorizontal,
   ScrollText,
   Settings2,
@@ -23,23 +24,28 @@ const navItems = [
   { to: '/studio', label: 'AI 设计室', icon: Sparkles, roles: ['admin', 'manager'] as Role[] },
   { to: '/apps', label: '应用中心', icon: AppWindow, roles: ['admin', 'manager'] as Role[] },
   { to: '/knowledge', label: '知识库', icon: Database, roles: ['admin', 'manager'] as Role[] },
-  { to: '/models', label: '模型与工具', icon: Settings2, roles: ['admin'] as Role[] },
+  { to: '/tools', label: '工具与模型', icon: Settings2, roles: ['admin', 'manager'] as Role[] },
   { to: '/agent', label: 'Agent 接入', icon: KeyRound, roles: ['admin'] as Role[] },
   { to: '/portal', label: '业务应用', icon: Store, roles: ['admin', 'manager', 'user'] as Role[] },
   { to: '/chat', label: '在线对话', icon: MessagesSquare, roles: ['admin', 'manager', 'user'] as Role[] },
   { to: '/logs', label: '运行与质量', icon: ScrollText, roles: ['admin', 'manager'] as Role[] },
+  { to: '/evaluation-sets', label: '评测集', icon: FlaskConical, roles: ['admin', 'manager'] as Role[] },
+  { to: '/settings', label: '设置', icon: Settings2, roles: ['admin'] as Role[] },
 ];
 
 const titleByPrefix: Record<string, string> = {
   dashboard: '交付工作台',
   studio: 'AI 设计室',
   models: '模型与工具',
+  tools: '工具与模型',
   agent: 'Agent 接入',
   knowledge: '知识库',
   apps: '应用中心',
   portal: '业务应用',
   chat: '在线对话',
   logs: '运行与质量',
+  'evaluation-sets': '评测集',
+  settings: '设置',
 };
 
 export function AppShell({ role, onRoleChange, children }: PropsWithChildren<{ role: Role; onRoleChange: (role: Role) => void }>) {
@@ -49,7 +55,7 @@ export function AppShell({ role, onRoleChange, children }: PropsWithChildren<{ r
   const pageTitle = titleByPrefix[pathKey] ?? '知枢';
   const mobileItems = role === 'user'
     ? visibleItems
-    : visibleItems.filter((item) => ['/dashboard', '/knowledge', '/chat', '/logs'].includes(item.to));
+    : visibleItems.filter((item) => ['/dashboard', '/knowledge', '/logs', '/evaluation-sets'].includes(item.to));
   const moreItems = visibleItems.filter((item) => !mobileItems.includes(item));
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement>(null);
@@ -139,8 +145,8 @@ export function AppShell({ role, onRoleChange, children }: PropsWithChildren<{ r
 }
 
 export const allowedRoutes: Record<Role, string[]> = {
-  admin: ['/dashboard', '/studio', '/models', '/agent', '/knowledge', '/apps', '/portal', '/chat', '/logs'],
-  manager: ['/dashboard', '/studio', '/knowledge', '/apps', '/portal', '/chat', '/logs'],
+  admin: ['/dashboard', '/studio', '/models', '/tools', '/agent', '/knowledge', '/apps', '/portal', '/chat', '/logs', '/evaluation-sets', '/settings'],
+  manager: ['/dashboard', '/studio', '/tools', '/knowledge', '/apps', '/portal', '/chat', '/logs', '/evaluation-sets'],
   user: ['/dashboard', '/portal', '/chat'],
 };
 

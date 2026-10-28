@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -15,6 +15,7 @@ from ...fde.designer import DesignError, design_manifest
 from ...fde.runtime import execute_manifest
 from ...models import (
     AppVersion,
+    AppShare,
     AuditEvent,
     Conversation,
     EvaluationCase,
@@ -28,9 +29,11 @@ from ...models import (
     QAApp,
     QueryLog,
     RunStatus,
+    ToolConfig,
+    TraceStep,
     utc_now,
 )
-from ...security import AuthContext, get_auth_context, require_roles
+from ...security import AuthContext, get_auth_context, hash_token, issue_token, require_roles
 
 router = APIRouter()
 
@@ -54,10 +57,15 @@ class VersionRequest(BaseModel):
     version_id: str | None = None
 
 
+class VersionCreateRequest(BaseModel):
+    release_notes: str = Field(default="", max_length=4000)
+
+
 class RunRequest(BaseModel):
     message: str = Field(default="", max_length=12000)
     input_values: dict[str, Any] = Field(default_factory=dict)
     conversation_id: str | None = None
+    confirmed_tool_names: list[str] = Field(default_factory=list, max_length=20)
 
 
 class EvaluationCaseRequest(BaseModel):
@@ -79,6 +87,12 @@ class FeedbackRequest(BaseModel):
     comment: str = Field(default="", max_length=4000)
 
 
+class ShareCreateRequest(BaseModel):
+    name: str = Field(default="公开分享", min_length=1, max_length=120)
+    expires_in_days: int | None = Field(default=30, ge=1, le=365)
+    max_uses: int | None = Field(default=None, ge=1, le=1_000_000)
+
+
 def _draft(app: QAApp) -> Manifest:
     return Manifest.model_validate(app.draft_manifest) if app.draft_manifest else manifest_from_qa_app(app)
 
@@ -95,10 +109,11 @@ async def _app(session: AsyncSession, app_id: str, workspace_id: str) -> QAApp:
     return app
 
 
-async def _resource_ids(session: AsyncSession, workspace_id: str) -> tuple[set[str], set[str]]:
+async def _resource_ids(session: AsyncSession, workspace_id: str) -> tuple[set[str], set[str], set[str]]:
     models = set(await session.scalars(select(ModelConfig.id).where(ModelConfig.workspace_id == workspace_id, ModelConfig.model_type == ModelType.LLM, ModelConfig.is_enabled.is_(True))))
     knowledge = set(await session.scalars(select(KnowledgeBase.id).where(KnowledgeBase.workspace_id == workspace_id)))
-    return models, knowledge
+    tools = set(await session.scalars(select(ToolConfig.id).where(ToolConfig.workspace_id == workspace_id, ToolConfig.is_enabled.is_(True))))
+    return models, knowledge, tools
 
 
 async def _audit(session: AsyncSession, context: AuthContext, action: str, app_id: str, detail: dict[str, Any] | None = None) -> None:
@@ -106,7 +121,7 @@ async def _audit(session: AsyncSession, context: AuthContext, action: str, app_i
 
 
 def _version_payload(version: AppVersion) -> dict[str, Any]:
-    return {"id": version.id, "version": version.version, "manifest": version.manifest, "created_at": version.created_at}
+    return {"id": version.id, "version": version.version, "manifest": version.manifest, "release_notes": version.release_notes, "created_at": version.created_at}
 
 
 def _app_payload(app: QAApp) -> dict[str, Any]:
@@ -154,7 +169,8 @@ async def _save_manifest(session: AsyncSession, app: QAApp, manifest: Manifest) 
 @router.get("/capabilities")
 async def capabilities(_context: AuthContext = Depends(get_auth_context)) -> dict[str, Any]:
     return {
-        "protocol": "fde.app/v1",
+        "protocol": "fde.app/v2",
+        "application_types": ["simple", "agent"],
         "workflow": ["discover", "design", "validate", "draft", "preview", "evaluate", "version", "publish", "run", "rollback"],
         "templates": [{"key": item.key, "name": item.name, "knowledge_bases": item.knowledge_bases.model_dump()} for item in list_templates()],
         "endpoints": {
@@ -166,7 +182,7 @@ async def capabilities(_context: AuthContext = Depends(get_auth_context)) -> dic
             "publish": "POST /api/v1/fde/apps/{app_id}/publish",
             "run": "POST /api/v1/fde/apps/{app_id}/run",
         },
-        "limits": {"external_http_tools": False, "streaming_fde_run": False, "evaluation_score": "binary"},
+        "limits": {"external_http_tools": True, "agent_tool_loop": True, "chatflow": False, "streaming_fde_run": False, "evaluation_score": "binary"},
     }
 
 
@@ -177,8 +193,8 @@ async def templates(_context: AuthContext = Depends(get_auth_context)) -> list[d
 
 @router.post("/validate")
 async def validate(payload: ManifestRequest, context: AuthContext = Depends(get_auth_context), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
-    models, knowledge = await _resource_ids(session, context.workspace_id)
-    result = validate_manifest(payload.manifest, models, knowledge)
+    models, knowledge, tools = await _resource_ids(session, context.workspace_id)
+    result = validate_manifest(payload.manifest, models, knowledge, tools)
     return result.model_dump()
 
 
@@ -191,8 +207,8 @@ async def design(payload: DesignRequest, context: AuthContext = Depends(require_
         manifest, simulated = await design_manifest(session, brief=payload.brief, workspace_id=context.workspace_id, template_key=payload.template_key, llm_model_id=model_id, base_manifest=payload.base_manifest)
     except DesignError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    models, knowledge = await _resource_ids(session, context.workspace_id)
-    result = validate_manifest(manifest, models, knowledge)
+    models, knowledge, tools = await _resource_ids(session, context.workspace_id)
+    result = validate_manifest(manifest, models, knowledge, tools)
     return {"manifest": manifest.model_dump(mode="json"), "simulated": simulated, "issues": result.issues, "publish_ready": result.publish_ready}
 
 
@@ -208,9 +224,117 @@ async def create_app(payload: AppCreateRequest, context: AuthContext = Depends(r
     return _app_payload(await _app(session, app.id, context.workspace_id))
 
 
+@router.get("/apps")
+async def list_apps(context: AuthContext = Depends(get_auth_context), session: AsyncSession = Depends(get_session)) -> list[dict[str, Any]]:
+    query = (
+        select(QAApp)
+        .where(QAApp.workspace_id == context.workspace_id)
+        .options(selectinload(QAApp.knowledge_bases), selectinload(QAApp.versions))
+        .order_by(QAApp.updated_at.desc())
+    )
+    if context.role == "user":
+        query = query.where(QAApp.is_enabled.is_(True), QAApp.published_version_id.is_not(None))
+    apps = list(await session.scalars(query))
+    if not apps:
+        return []
+    conversation_rows = await session.execute(
+        select(Conversation.app_id, func.count(Conversation.id))
+        .where(Conversation.app_id.in_([app.id for app in apps]))
+        .group_by(Conversation.app_id)
+    )
+    conversation_counts = {app_id: count for app_id, count in conversation_rows.all()}
+    return [
+        {**_app_payload(app), "conversation_count": conversation_counts.get(app.id, 0)}
+        for app in apps
+    ]
+
+
 @router.get("/apps/{app_id}")
 async def get_app(app_id: str, context: AuthContext = Depends(get_auth_context), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     return _app_payload(await _app(session, app_id, context.workspace_id))
+
+
+@router.post("/apps/{app_id}/duplicate", status_code=201)
+async def duplicate_app(app_id: str, context: AuthContext = Depends(require_roles("admin", "manager")), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    source = await _app(session, app_id, context.workspace_id)
+    manifest = _draft(source).model_copy(deep=True)
+    manifest.name = f"{manifest.name}（副本）"
+    duplicate = QAApp(workspace_id=context.workspace_id, status="draft", is_enabled=False)
+    await _save_manifest(session, duplicate, manifest)
+    session.add(duplicate)
+    await session.flush()
+    await _audit(session, context, "application.duplicated", duplicate.id, {"source_app_id": source.id})
+    await session.commit()
+    return _app_payload(await _app(session, duplicate.id, context.workspace_id))
+
+
+@router.post("/apps/{app_id}/archive")
+async def archive_app(app_id: str, context: AuthContext = Depends(require_roles("admin", "manager")), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    app = await _app(session, app_id, context.workspace_id)
+    app.is_enabled = False
+    app.status = "archived"
+    await _audit(session, context, "application.archived", app.id)
+    await session.commit()
+    return _app_payload(await _app(session, app.id, context.workspace_id))
+
+
+@router.post("/apps/{app_id}/restore")
+async def restore_app(app_id: str, context: AuthContext = Depends(require_roles("admin", "manager")), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    app = await _app(session, app_id, context.workspace_id)
+    if app.status != "archived":
+        raise HTTPException(status_code=409, detail="只有已归档应用可以恢复")
+    app.status = "draft"
+    await _audit(session, context, "application.restored", app.id)
+    await session.commit()
+    return _app_payload(await _app(session, app.id, context.workspace_id))
+
+
+@router.delete("/apps/{app_id}", status_code=204)
+async def delete_app(app_id: str, context: AuthContext = Depends(require_roles("admin", "manager")), session: AsyncSession = Depends(get_session)) -> None:
+    app = await _app(session, app_id, context.workspace_id)
+    if app.is_enabled:
+        raise HTTPException(status_code=409, detail="请先下线或归档应用，再永久删除")
+    await _audit(session, context, "application.deleted", app.id, {"name": app.name})
+    await session.delete(app)
+    await session.commit()
+
+
+@router.get("/apps/{app_id}/shares")
+async def list_shares(app_id: str, context: AuthContext = Depends(require_roles("admin", "manager")), session: AsyncSession = Depends(get_session)) -> list[dict[str, Any]]:
+    await _app(session, app_id, context.workspace_id)
+    shares = list(await session.scalars(select(AppShare).where(AppShare.app_id == app_id).order_by(AppShare.created_at.desc())))
+    return [{"id": item.id, "name": item.name, "expires_at": item.expires_at, "max_uses": item.max_uses, "use_count": item.use_count, "is_enabled": item.is_enabled, "created_at": item.created_at} for item in shares]
+
+
+@router.post("/apps/{app_id}/shares", status_code=201)
+async def create_share(app_id: str, payload: ShareCreateRequest, context: AuthContext = Depends(require_roles("admin", "manager")), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    app = await _app(session, app_id, context.workspace_id)
+    if not app.is_enabled or not app.published_version_id:
+        raise HTTPException(status_code=409, detail="应用发布后才能创建免登录分享链接")
+    token = f"zss_{issue_token()}"
+    share = AppShare(
+        app_id=app.id,
+        name=payload.name,
+        token_hash=hash_token(token),
+        expires_at=datetime.now(UTC) + timedelta(days=payload.expires_in_days) if payload.expires_in_days else None,
+        max_uses=payload.max_uses,
+    )
+    session.add(share)
+    await session.flush()
+    await _audit(session, context, "application.share_created", app.id, {"share_id": share.id, "expires_at": share.expires_at.isoformat() if share.expires_at else None, "max_uses": share.max_uses})
+    await session.commit()
+    return {"id": share.id, "name": share.name, "token": token, "expires_at": share.expires_at, "max_uses": share.max_uses, "use_count": 0, "is_enabled": True, "created_at": share.created_at}
+
+
+@router.delete("/apps/{app_id}/shares/{share_id}", status_code=204)
+async def revoke_share(app_id: str, share_id: str, context: AuthContext = Depends(require_roles("admin", "manager")), session: AsyncSession = Depends(get_session)) -> None:
+    app = await _app(session, app_id, context.workspace_id)
+    share = await session.get(AppShare, share_id)
+    if not share or share.app_id != app.id:
+        raise HTTPException(status_code=404, detail="分享链接不存在")
+    share.is_enabled = False
+    await _audit(session, context, "application.share_revoked", app.id, {"share_id": share.id})
+    await session.commit()
 
 
 @router.put("/apps/{app_id}/manifest")
@@ -227,19 +351,19 @@ async def update_manifest(app_id: str, payload: ManifestRequest, context: AuthCo
 @router.post("/apps/{app_id}/validate")
 async def validate_app(app_id: str, context: AuthContext = Depends(get_auth_context), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     app = await _app(session, app_id, context.workspace_id)
-    models, knowledge = await _resource_ids(session, context.workspace_id)
-    return validate_manifest(_draft(app), models, knowledge).model_dump()
+    models, knowledge, tools = await _resource_ids(session, context.workspace_id)
+    return validate_manifest(_draft(app), models, knowledge, tools).model_dump()
 
 
 @router.post("/apps/{app_id}/versions", status_code=201)
-async def create_version(app_id: str, context: AuthContext = Depends(require_roles("admin", "manager")), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+async def create_version(app_id: str, payload: VersionCreateRequest | None = None, context: AuthContext = Depends(require_roles("admin", "manager")), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     app = await _app(session, app_id, context.workspace_id)
-    models, knowledge = await _resource_ids(session, context.workspace_id)
-    validation = validate_for_publish(_draft(app), models, knowledge)
+    models, knowledge, tools = await _resource_ids(session, context.workspace_id)
+    validation = validate_for_publish(_draft(app), models, knowledge, tools)
     if not validation.valid:
         raise HTTPException(status_code=422, detail={"message": "草稿校验未通过", "issues": [item.model_dump() for item in validation.issues]})
     number = (await session.scalar(select(func.max(AppVersion.version)).where(AppVersion.app_id == app.id))) or 0
-    version = AppVersion(app_id=app.id, version=number + 1, manifest=_draft(app).model_dump(mode="json"), created_by=context.user_id)
+    version = AppVersion(app_id=app.id, version=number + 1, manifest=_draft(app).model_dump(mode="json"), release_notes=payload.release_notes if payload else "", created_by=context.user_id)
     session.add(version)
     app.status = "ready"
     await _audit(session, context, "application.version_created", app.id, {"version": version.version})
@@ -252,14 +376,21 @@ async def _publish(app: QAApp, version_id: str | None, context: AuthContext, ses
     version = await session.scalar(select(AppVersion).where(AppVersion.app_id == app.id, AppVersion.id == version_id)) if version_id else await session.scalar(select(AppVersion).where(AppVersion.app_id == app.id).order_by(AppVersion.version.desc()).limit(1))
     if not version:
         raise HTTPException(status_code=422, detail="请先创建应用版本")
-    models, knowledge = await _resource_ids(session, context.workspace_id)
-    validation = validate_for_publish(version.manifest, models, knowledge)
+    models, knowledge, tools = await _resource_ids(session, context.workspace_id)
+    validation = validate_for_publish(version.manifest, models, knowledge, tools)
     if not validation.valid:
         raise HTTPException(status_code=422, detail={"message": "发布校验未通过", "issues": [item.model_dump() for item in validation.issues]})
-    suite_ids = list(await session.scalars(select(EvaluationSuite.id).where(EvaluationSuite.app_id == app.id)))
-    if suite_ids:
-        latest = await session.scalar(select(EvaluationRun).where(EvaluationRun.suite_id.in_(suite_ids)).order_by(EvaluationRun.created_at.desc()).limit(1))
-        case_count = await session.scalar(select(func.count()).select_from(EvaluationCase).where(EvaluationCase.suite_id.in_(suite_ids)))
+    release_suite_ids = list(
+        await session.scalars(
+            select(EvaluationSuite.id).where(
+                EvaluationSuite.app_id == app.id,
+                EvaluationSuite.is_release_gate.is_(True),
+            )
+        )
+    )
+    if release_suite_ids:
+        latest = await session.scalar(select(EvaluationRun).where(EvaluationRun.suite_id.in_(release_suite_ids)).order_by(EvaluationRun.created_at.desc()).limit(1))
+        case_count = await session.scalar(select(func.count()).select_from(EvaluationCase).where(EvaluationCase.suite_id.in_(release_suite_ids)))
         if not latest or latest.failed_count or latest.passed_count < (case_count or 0):
             raise HTTPException(status_code=409, detail="发布质量门禁未通过：请先运行全部评测并确保通过")
     app.published_version_id = version.id
@@ -307,7 +438,15 @@ async def _execute(app: QAApp, manifest: Manifest, version_id: str | None, paylo
         history = list(await session.scalars(select(Message).where(Message.conversation_id == conversation.id).order_by(Message.created_at)))
     query = payload.message.strip() or next(iter(payload.input_values.values()), app.name)
     try:
-        result = await execute_manifest(session, manifest, message=payload.message, input_values=payload.input_values, history=history, workspace_id=context.workspace_id)
+        result = await execute_manifest(
+            session,
+            manifest,
+            message=payload.message,
+            input_values=payload.input_values,
+            history=history,
+            workspace_id=context.workspace_id,
+            confirmed_tool_names=set(payload.confirmed_tool_names),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if not conversation:
@@ -320,8 +459,87 @@ async def _execute(app: QAApp, manifest: Manifest, version_id: str | None, paylo
     log = QueryLog(workspace_id=context.workspace_id, app_id=app.id, conversation_id=conversation.id, demo_role=context.role, query=str(query), status=RunStatus.SUCCESS, input_tokens=result["tokens"]["input"], output_tokens=result["tokens"]["output"], total_tokens=result["tokens"]["total"], duration_ms=result["duration_ms"], finished_at=datetime.now(UTC))
     session.add_all([user_message, assistant_message, log])
     await session.flush()
+    for ordinal, step in enumerate(result.get("agent_steps", []), start=1):
+        session.add(
+            TraceStep(
+                query_log_id=log.id,
+                ordinal=ordinal,
+                name=f"agent_tool:{step.get('tool') or 'unknown'}",
+                status=str(step.get("status") or "unknown"),
+                duration_ms=0,
+                detail=str(step.get("result") or "")[:4000],
+                metadata_json={
+                    "agent_step": step.get("step"),
+                    "tool": step.get("tool"),
+                    "arguments": step.get("arguments") or {},
+                },
+            )
+        )
     await session.commit()
     return {**result, "conversation_id": conversation.id, "message_id": assistant_message.id, "app_version_id": version_id, "portal_path": f"/portal/apps/{app.id}"}
+
+
+async def _public_share(token: str, session: AsyncSession) -> tuple[AppShare, QAApp, AppVersion]:
+    share = await session.scalar(select(AppShare).where(AppShare.token_hash == hash_token(token), AppShare.is_enabled.is_(True)))
+    if not share:
+        raise HTTPException(status_code=404, detail="分享链接不存在或已撤销")
+    if share.expires_at:
+        expires_at = share.expires_at if share.expires_at.tzinfo else share.expires_at.replace(tzinfo=UTC)
+        if expires_at <= datetime.now(UTC):
+            raise HTTPException(status_code=410, detail="分享链接已过期")
+    if share.max_uses is not None and share.use_count >= share.max_uses:
+        raise HTTPException(status_code=410, detail="分享链接访问次数已用尽")
+    app = await session.scalar(
+        select(QAApp)
+        .where(QAApp.id == share.app_id, QAApp.is_enabled.is_(True), QAApp.published_version_id.is_not(None))
+        .options(selectinload(QAApp.knowledge_bases), selectinload(QAApp.versions))
+    )
+    if not app:
+        raise HTTPException(status_code=404, detail="分享应用已下线")
+    version = await session.get(AppVersion, app.published_version_id)
+    if not version:
+        raise HTTPException(status_code=409, detail="分享应用的发布版本不可用")
+    return share, app, version
+
+
+@router.get("/share/{token}")
+async def get_public_share(token: str, session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    _share, app, version = await _public_share(token, session)
+    manifest = Manifest.model_validate(version.manifest)
+    return {
+        "id": app.id,
+        "name": app.name,
+        "description": app.description,
+        "scenario_type": app.scenario_type,
+        "status": "published",
+        "is_enabled": True,
+        "manifest": manifest.model_dump(mode="json"),
+        "published_version_id": version.id,
+        "published_version": _version_payload(version),
+        "versions": [],
+        "portal_path": f"/share/{token}",
+        "updated_at": app.updated_at,
+    }
+
+
+@router.post("/share/{token}/run")
+async def run_public_share(token: str, payload: RunRequest, session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    share, app, version = await _public_share(token, session)
+    claimed = await session.execute(
+        update(AppShare)
+        .where(
+            AppShare.id == share.id,
+            AppShare.is_enabled.is_(True),
+            or_(AppShare.max_uses.is_(None), AppShare.use_count < AppShare.max_uses),
+        )
+        .values(use_count=AppShare.use_count + 1)
+    )
+    if claimed.rowcount != 1:
+        await session.rollback()
+        raise HTTPException(status_code=410, detail="分享链接访问次数已用尽")
+    await session.commit()
+    context = AuthContext(role="user", workspace_id=app.workspace_id, user_id=None, auth_type="public_share")
+    return await _execute(app, Manifest.model_validate(version.manifest), version.id, payload, context, session)
 
 
 @router.post("/apps/{app_id}/preview")
@@ -333,10 +551,8 @@ async def preview(app_id: str, payload: RunRequest, context: AuthContext = Depen
 @router.post("/apps/{app_id}/run")
 async def run(app_id: str, payload: RunRequest, context: AuthContext = Depends(get_auth_context), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     app = await _app(session, app_id, context.workspace_id)
-    if not app.is_enabled:
+    if not app.is_enabled or not app.published_version_id:
         raise HTTPException(status_code=404, detail="应用尚未发布")
-    if not app.published_version_id:
-        return await _execute(app, _draft(app), None, payload, context, session)
     version = await session.get(AppVersion, app.published_version_id)
     if not version or version.app_id != app.id:
         raise HTTPException(status_code=409, detail="发布版本不可用")
@@ -346,10 +562,23 @@ async def run(app_id: str, payload: RunRequest, context: AuthContext = Depends(g
 @router.put("/apps/{app_id}/evaluation-suite")
 async def save_suite(app_id: str, payload: EvaluationSuiteRequest, context: AuthContext = Depends(require_roles("admin", "manager")), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     app = await _app(session, app_id, context.workspace_id)
-    suites = list(await session.scalars(select(EvaluationSuite).where(EvaluationSuite.app_id == app.id)))
+    suites = list(
+        await session.scalars(
+            select(EvaluationSuite).where(
+                EvaluationSuite.app_id == app.id,
+                EvaluationSuite.is_release_gate.is_(True),
+            )
+        )
+    )
     for suite in suites:
         await session.delete(suite)
-    suite = EvaluationSuite(app_id=app.id, name=payload.name)
+    suite = EvaluationSuite(
+        app_id=app.id,
+        name=payload.name,
+        description="由应用发布流程维护的质量门禁",
+        is_release_gate=True,
+        created_by=context.user_id,
+    )
     session.add(suite)
     await session.flush()
     for item in payload.cases:
@@ -361,7 +590,7 @@ async def save_suite(app_id: str, payload: EvaluationSuiteRequest, context: Auth
 @router.get("/apps/{app_id}/evaluation-suite")
 async def get_suite(app_id: str, context: AuthContext = Depends(get_auth_context), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     app = await _app(session, app_id, context.workspace_id)
-    suite = await session.scalar(select(EvaluationSuite).where(EvaluationSuite.app_id == app.id).options(selectinload(EvaluationSuite.cases)).order_by(EvaluationSuite.updated_at.desc()).limit(1))
+    suite = await session.scalar(select(EvaluationSuite).where(EvaluationSuite.app_id == app.id, EvaluationSuite.is_release_gate.is_(True)).options(selectinload(EvaluationSuite.cases)).order_by(EvaluationSuite.updated_at.desc()).limit(1))
     if not suite:
         return {"suite": None, "latest_run": None}
     latest = await session.scalar(select(EvaluationRun).where(EvaluationRun.suite_id == suite.id).order_by(EvaluationRun.created_at.desc()).limit(1))
@@ -371,7 +600,7 @@ async def get_suite(app_id: str, context: AuthContext = Depends(get_auth_context
 @router.post("/apps/{app_id}/evaluate")
 async def evaluate(app_id: str, context: AuthContext = Depends(require_roles("admin", "manager")), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     app = await _app(session, app_id, context.workspace_id)
-    suite = await session.scalar(select(EvaluationSuite).where(EvaluationSuite.app_id == app.id).options(selectinload(EvaluationSuite.cases)).order_by(EvaluationSuite.updated_at.desc()).limit(1))
+    suite = await session.scalar(select(EvaluationSuite).where(EvaluationSuite.app_id == app.id, EvaluationSuite.is_release_gate.is_(True)).options(selectinload(EvaluationSuite.cases)).order_by(EvaluationSuite.updated_at.desc()).limit(1))
     if not suite or not suite.cases:
         raise HTTPException(status_code=422, detail="请先创建评测集")
     manifest = _draft(app)

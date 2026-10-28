@@ -1,6 +1,6 @@
 import { AlertTriangle, Check, CheckCircle2, FileImage, FileSpreadsheet, FileText, LoaderCircle, Plus, RefreshCw, Settings2, Tags, UploadCloud } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { apiFetch, errorMessage, formatDateTime, type ApiImportJob, type ApiKnowledgeBase, type ApiKnowledgeFile, type ApiModelOption } from '../api/client';
 import { KnowledgeNav } from '../components/KnowledgeNav';
 import { useToast } from '../components/Toast';
@@ -28,6 +28,7 @@ function splitMetadataList(value: string) {
 
 export function KnowledgeDetailPage() {
   const { id = '' } = useParams();
+  const navigate = useNavigate();
   const [kb, setKb] = useState<ApiKnowledgeBase | null>(null);
   const [files, setFiles] = useState<ApiKnowledgeFile[]>([]);
   const [jobs, setJobs] = useState<ApiImportJob[]>([]);
@@ -229,7 +230,7 @@ export function KnowledgeDetailPage() {
     <div className="workspace-with-resource">
       <KnowledgeNav id={kb.id} name={kb.name} />
       <main className="page page-enter resource-page">
-        <PageHeader eyebrow="知识库 / 文件与任务" title={kb.name} description={kb.description || '尚未填写知识库说明。'} actions={<><Button icon={<Settings2 size={16} />} onClick={() => setSettingsOpen(true)}>索引设置</Button><Button icon={<RefreshCw size={16} />} onClick={() => { setTaskOpen(true); void load(); }}>查看构建任务</Button><Button variant="primary" icon={<Plus size={17} />} onClick={() => setImportOpen(true)}>导入文件</Button></>} />
+        <PageHeader eyebrow="知识库 / 文件与任务" title={kb.name} description={kb.description || '尚未填写知识库说明。'} actions={<><Button icon={<Settings2 size={16} />} onClick={() => setSettingsOpen(true)}>索引设置</Button><Button icon={<RefreshCw size={16} />} onClick={() => { setTaskOpen(true); void load(); }}>查看构建任务</Button><Button variant="primary" icon={<Plus size={17} />} onClick={() => navigate(`/knowledge/${kb.id}/import`)}>导入数据</Button></>} />
         {error ? <Notice tone="error" title="后端请求失败">{error}</Notice> : null}
         <div className="detail-summary"><div><span>文件</span><strong>{kb.file_count}</strong></div><div><span>可用分块</span><strong>{kb.chunk_count.toLocaleString()}</strong></div><div><span>切块方式</span><strong>{kb.chunk_method === 'parent_child' ? '父子切分' : kb.chunk_method === 'semantic' ? '语义切分' : '结构递归'}</strong></div><div><span>向量模型</span><strong>{embeddingName}</strong></div><div><span>元数据抽取</span><strong>{metadataModelName}</strong></div><div><span>OCR 模型</span><strong>{ocrName}</strong></div><div><span>最后更新</span><strong>{formatDateTime(kb.updated_at)}</strong></div></div>
         {failedFiles.length ? <Notice tone="warning" title={`${failedFiles.length} 个文件需要处理`}>{failedFiles.map((file) => `${file.filename}：${file.error_message ?? '处理失败'}`).join('；')}</Notice> : null}

@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import UTC, datetime
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urlparse
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, Response, UploadFile, status
+import httpx
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Response, UploadFile, status
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...config import get_settings
 from ...db import get_session
-from ...models import DocumentChunk, ImportJob, JobStatus, KnowledgeBase, KnowledgeFile, ModelConfig, ModelType
+from ...models import ChunkMethod, DocumentChunk, ImportJob, JobStatus, KnowledgeBase, KnowledgeFile, ModelConfig, ModelType
 from ...schemas import (
     ChunkResponse,
     ChunkUpdate,
@@ -22,16 +26,60 @@ from ...schemas import (
     KnowledgeBaseResponse,
     KnowledgeBaseUpdate,
     KnowledgeFileResponse,
+    WebImportRequest,
 )
 from ...security import require_roles
 from ...services.ingestion import process_import_job
+from ...services.chunking import normalize_chunk_config, split_document
 from ...services.metadata_extraction import normalize_document_metadata
-from ...services.parsers import SUPPORTED_EXTENSIONS
+from ...services.ocr import build_ocr, get_ocr
+from ...services.parsers import SUPPORTED_EXTENSIONS, parse_bytes
+from ...providers import build_gateway
 from ...services.storage import ObjectStorage, get_storage
+from ...services.tools import validate_target
 from ...tasks import process_import_job_task
 from ...tenancy import current_workspace_id
 
 router = APIRouter(dependencies=[Depends(require_roles("admin", "manager"))])
+
+
+class _ReadableHtml(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.parts: list[str] = []
+        self.title = ""
+        self._in_title = False
+        self._ignored_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag in {"script", "style", "noscript", "svg"}:
+            self._ignored_depth += 1
+        elif tag == "title":
+            self._in_title = True
+        elif tag in {"h1", "h2", "h3", "h4", "h5", "h6", "p", "div", "li", "br", "tr"}:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"script", "style", "noscript", "svg"} and self._ignored_depth:
+            self._ignored_depth -= 1
+        elif tag == "title":
+            self._in_title = False
+        elif tag in {"p", "div", "li", "tr"}:
+            self.parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if self._ignored_depth:
+            return
+        text = " ".join(data.split())
+        if not text:
+            return
+        if self._in_title:
+            self.title = f"{self.title} {text}".strip()
+        self.parts.append(text)
+
+    def markdown(self) -> str:
+        lines = [" ".join(line.split()) for line in "".join(self.parts).splitlines()]
+        return "\n\n".join(line for line in lines if line)
 
 
 async def dispatch_import_job(
@@ -296,9 +344,10 @@ async def update_file_metadata(
 async def upload_file(
     knowledge_base_id: str,
     upload: UploadFile = File(...),
+    config: str = Form("{}"),
     session: AsyncSession = Depends(get_session),
 ) -> FileUploadResponse:
-    await get_kb_or_404(session, knowledge_base_id)
+    knowledge_base = await get_kb_or_404(session, knowledge_base_id)
     settings = get_settings()
     safe_name = Path(upload.filename or "upload").name
     extension = Path(safe_name).suffix.lower()
@@ -309,6 +358,21 @@ async def upload_file(
         raise HTTPException(status_code=413, detail="File exceeds configured upload size limit")
     if not data:
         raise HTTPException(status_code=422, detail="Uploaded file is empty")
+    try:
+        chunk_config = normalize_chunk_config(
+            json.loads(config or "{}"),
+            default_method=knowledge_base.chunk_method,
+            default_chunk_size=knowledge_base.chunk_size,
+            default_chunk_overlap=knowledge_base.chunk_overlap,
+            default_parent_chunk_size=knowledge_base.parent_chunk_size,
+            default_child_chunk_size=knowledge_base.child_chunk_size,
+        )
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail="切块配置不是有效 JSON") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if chunk_config["method"] == ChunkMethod.SEMANTIC and not knowledge_base.semantic_llm_model_id:
+        raise HTTPException(status_code=422, detail="语义分块需要先配置文本理解模型")
     checksum = hashlib.sha256(data).hexdigest()
     duplicate = await session.scalar(
         select(KnowledgeFile).where(
@@ -332,6 +396,7 @@ async def upload_file(
         size_bytes=len(data),
         storage_key=storage_key,
         checksum_sha256=checksum,
+        chunk_config=chunk_config,
         status=JobStatus.QUEUED,
     )
     job = ImportJob(file=file, status=JobStatus.QUEUED, progress=0, current_stage="queued")
@@ -340,6 +405,153 @@ async def upload_file(
     await session.refresh(file)
     await session.refresh(job)
 
+    job = await dispatch_import_job(session, job, file, storage=storage)
+    await session.refresh(file)
+    return FileUploadResponse(file=KnowledgeFileResponse.model_validate(file), job=ImportJobResponse.model_validate(job))
+
+
+@router.post("/{knowledge_base_id}/chunk-preview")
+async def preview_chunks(
+    knowledge_base_id: str,
+    upload: UploadFile = File(...),
+    config: str = Form("{}"),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    knowledge_base = await get_kb_or_404(session, knowledge_base_id)
+    settings = get_settings()
+    safe_name = Path(upload.filename or "preview").name
+    extension = Path(safe_name).suffix.lower()
+    if extension not in SUPPORTED_EXTENSIONS:
+        raise HTTPException(status_code=415, detail=f"Unsupported file extension: {extension or 'none'}")
+    data = await upload.read(settings.max_upload_bytes + 1)
+    if not data or len(data) > settings.max_upload_bytes:
+        raise HTTPException(status_code=413 if data else 422, detail="Preview file is empty or exceeds the upload limit")
+    try:
+        values = json.loads(config or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=422, detail="切块配置不是有效 JSON") from exc
+    try:
+        chunk_config = normalize_chunk_config(
+            values,
+            default_method=knowledge_base.chunk_method,
+            default_chunk_size=knowledge_base.chunk_size,
+            default_chunk_overlap=knowledge_base.chunk_overlap,
+            default_parent_chunk_size=knowledge_base.parent_chunk_size,
+            default_child_chunk_size=knowledge_base.child_chunk_size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    method = chunk_config["method"]
+    ocr = get_ocr()
+    if knowledge_base.ocr_model_id:
+        ocr_model = await session.get(ModelConfig, knowledge_base.ocr_model_id)
+        if ocr_model:
+            ocr = build_ocr(ocr_model)
+    try:
+        parsed = await parse_bytes(data, safe_name, ocr=ocr)
+        semantic_gateway = None
+        if method == "semantic":
+            if not knowledge_base.semantic_llm_model_id:
+                raise ValueError("语义分块需要先配置文本理解模型")
+            semantic_model = await session.get(ModelConfig, knowledge_base.semantic_llm_model_id)
+            if not semantic_model:
+                raise ValueError("语义分块模型不存在")
+            semantic_gateway = build_gateway(semantic_model)
+        chunks = await split_document(
+            parsed,
+            chunk_method=method,
+            chunk_size=chunk_config["chunk_size"],
+            chunk_overlap=chunk_config["chunk_overlap"],
+            parent_chunk_size=chunk_config["parent_chunk_size"],
+            child_chunk_size=chunk_config["child_chunk_size"],
+            semantic_gateway=semantic_gateway,
+            separators=chunk_config["separators"],
+            heading_level=chunk_config["heading_level"],
+            rows_per_chunk=chunk_config["rows_per_chunk"],
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    preview = [{"ordinal": index, "title": str(item.metadata.get("title", f"分块 {index}")), "content": item.page_content, "char_count": len(item.page_content), "metadata": item.metadata} for index, item in enumerate(chunks[:100], start=1)]
+    return {"filename": safe_name, "method": method, "total_chunks": len(chunks), "returned_chunks": len(preview), "page_count": parsed.page_count, "warnings": parsed.warnings, "chunks": preview}
+
+
+@router.post("/{knowledge_base_id}/web-import", response_model=FileUploadResponse, status_code=status.HTTP_202_ACCEPTED)
+async def import_web_page(
+    knowledge_base_id: str,
+    payload: WebImportRequest,
+    session: AsyncSession = Depends(get_session),
+) -> FileUploadResponse:
+    knowledge_base = await get_kb_or_404(session, knowledge_base_id)
+    url = str(payload.url)
+    try:
+        await validate_target(url, allow_private_network=False)
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+            response = await client.get(url, headers={"User-Agent": "ZhishuKnowledgeImporter/1.0"})
+        response.raise_for_status()
+    except (ValueError, httpx.HTTPError) as exc:
+        raise HTTPException(status_code=422, detail=f"网页抓取失败：{exc}") from exc
+    content_type = response.headers.get("content-type", "").lower()
+    if "text/html" not in content_type and "text/plain" not in content_type:
+        raise HTTPException(status_code=415, detail="网页导入只支持 HTML 或纯文本响应")
+    if len(response.content) > min(get_settings().max_upload_bytes, 5_000_000):
+        raise HTTPException(status_code=413, detail="网页正文超过 5MB 导入上限")
+    if "text/html" in content_type:
+        parser = _ReadableHtml()
+        parser.feed(response.text)
+        body = parser.markdown()
+        page_title = payload.title or parser.title
+    else:
+        body = response.text.strip()
+        page_title = payload.title
+    if len(body) < 20:
+        raise HTTPException(status_code=422, detail="未从网页中提取到足够的正文")
+    parsed_url = urlparse(url)
+    fallback = (Path(parsed_url.path).stem or parsed_url.hostname or "web-page").strip()[:120]
+    safe_title = "".join(character for character in (page_title or fallback) if character not in "/\\\0").strip()
+    safe_name = f"{safe_title or 'web-page'}.md"
+    data = f"# {page_title or fallback}\n\n来源：{url}\n\n{body}\n".encode()
+    checksum = hashlib.sha256(data).hexdigest()
+    duplicate = await session.scalar(
+        select(KnowledgeFile).where(
+            KnowledgeFile.knowledge_base_id == knowledge_base_id,
+            KnowledgeFile.checksum_sha256 == checksum,
+        )
+    )
+    if duplicate:
+        raise HTTPException(status_code=409, detail="该网页内容已经导入当前知识库")
+    try:
+        chunk_config = normalize_chunk_config(
+            payload.chunk_config,
+            default_method=knowledge_base.chunk_method,
+            default_chunk_size=knowledge_base.chunk_size,
+            default_chunk_overlap=knowledge_base.chunk_overlap,
+            default_parent_chunk_size=knowledge_base.parent_chunk_size,
+            default_child_chunk_size=knowledge_base.child_chunk_size,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    file_id = str(uuid4())
+    storage_key = f"knowledge-bases/{knowledge_base_id}/{file_id}/{safe_name}"
+    storage = get_storage()
+    await storage.put_bytes(storage_key, data, "text/markdown")
+    file = KnowledgeFile(
+        id=file_id,
+        knowledge_base_id=knowledge_base_id,
+        filename=safe_name,
+        content_type="text/markdown",
+        extension=".md",
+        size_bytes=len(data),
+        storage_key=storage_key,
+        checksum_sha256=checksum,
+        status=JobStatus.QUEUED,
+        chunk_config=chunk_config,
+        document_metadata={"source_url": url},
+    )
+    job = ImportJob(file=file, status=JobStatus.QUEUED, progress=0, current_stage="queued")
+    session.add_all([file, job])
+    await session.commit()
+    await session.refresh(file)
+    await session.refresh(job)
     job = await dispatch_import_job(session, job, file, storage=storage)
     await session.refresh(file)
     return FileUploadResponse(file=KnowledgeFileResponse.model_validate(file), job=ImportJobResponse.model_validate(job))

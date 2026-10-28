@@ -34,9 +34,17 @@ def create_app() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
+        # Chromium Local Network Access may serialize a loopback Origin
+        # without its development-server port. Accept loopback variations
+        # only outside production; production still uses the explicit list.
+        allow_origin_regex=(r"^https?://(127\.0\.0\.1|localhost)(:\d+)?$" if settings.env != "production" else None),
         allow_credentials=False,
         allow_methods=["*"],
         allow_headers=["*"],
+        # Chromium's Local Network Access preflight applies when the local
+        # Vite app calls the local API. Keep this non-production so a
+        # production deployment must opt into its network policy explicitly.
+        allow_private_network=settings.env != "production",
     )
     app.include_router(api_router, prefix=settings.api_prefix)
     return app

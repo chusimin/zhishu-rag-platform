@@ -58,6 +58,7 @@ def validate_business(
     manifest: Manifest,
     available_model_ids: Iterable[str] | None = None,
     available_knowledge_base_ids: Iterable[str] | None = None,
+    available_tool_ids: Iterable[str] | None = None,
 ) -> ValidationResult:
     issues: list[Issue] = []
     template = get_template(manifest.template_key)
@@ -103,6 +104,15 @@ def validate_business(
                     message=f"{template.name}最多支持 {rule.max_items} 个知识库",
                 )
             )
+    tool_ids = set(available_tool_ids) if available_tool_ids is not None else None
+    if tool_ids is not None:
+        for index, tool in enumerate(manifest.tools):
+            if tool.tool_id and tool.tool_id not in tool_ids:
+                issues.append(Issue(path=f"tools.{index}.tool_id", code="tool_invalid", message="所选工具不存在、未启用或不可用"))
+    if manifest.type == "agent" and not any(tool.enabled for tool in manifest.tools):
+        issues.append(Issue(path="tools", code="agent_tool_required", message="Agent 至少需要一个可用工具", severity="warning"))
+    if manifest.agent.long_term_memory:
+        issues.append(Issue(path="agent.long_term_memory", code="long_term_memory_unavailable", message="跨会话长期记忆尚未启用，请关闭后发布"))
     return _result(issues)
 
 
@@ -125,6 +135,7 @@ def validate_manifest(
     payload: Manifest | Mapping[str, Any],
     available_model_ids: Iterable[str] | None = None,
     available_knowledge_base_ids: Iterable[str] | None = None,
+    available_tool_ids: Iterable[str] | None = None,
     input_values: Mapping[str, Any] | None = None,
 ) -> ValidationResult:
     schema_result = validate_schema(payload)
@@ -136,6 +147,7 @@ def validate_manifest(
             manifest,
             available_model_ids=available_model_ids,
             available_knowledge_base_ids=available_knowledge_base_ids,
+            available_tool_ids=available_tool_ids,
         ).issues
     )
     if input_values is not None:
@@ -147,11 +159,13 @@ def validate_for_publish(
     payload: Manifest | Mapping[str, Any],
     available_model_ids: Iterable[str],
     available_knowledge_base_ids: Iterable[str],
+    available_tool_ids: Iterable[str] | None = None,
 ) -> ValidationResult:
     return validate_manifest(
         payload,
         available_model_ids=available_model_ids,
         available_knowledge_base_ids=available_knowledge_base_ids,
+        available_tool_ids=available_tool_ids,
     )
 
 

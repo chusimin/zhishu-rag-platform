@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Literal
 
 from cryptography.fernet import Fernet, InvalidToken
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,6 +29,48 @@ class AuthContext:
     workspace_id: str
     user_id: str | None
     auth_type: str
+    scopes: frozenset[str] | None = None
+
+
+def _required_scope(request: Request) -> str | None:
+    """Map API-client requests to the least privilege required by the route.
+
+    Human sessions and development demo roles continue to use role checks. API
+    clients must satisfy both the stored role and the route scope.
+    """
+    path = request.url.path
+    method = request.method.upper()
+    if "/auth/" in path:
+        return None
+    if "/knowledge-bases" in path:
+        return "knowledge:read" if method == "GET" else "knowledge:write"
+    if "/models" in path or "/model-options" in path:
+        return "models:read" if method == "GET" else "models:write"
+    if "/tools" in path:
+        return "tools:read" if method == "GET" else "tools:write"
+    if "/logs" in path:
+        return "logs:read"
+    if "/fde/" in path:
+        if path.endswith("/run") or path.endswith("/preview"):
+            return "apps:run"
+        if path.endswith("/evaluate") or "evaluation-suite" in path:
+            return "apps:evaluate"
+        return "apps:read" if method == "GET" else "apps:write"
+    if "/apps" in path or "/conversations" in path:
+        return "apps:read" if method == "GET" else "apps:run" if "/chat" in path else "apps:write"
+    return None
+
+
+def _enforce_scope(context: AuthContext, request: Request) -> None:
+    if context.auth_type != "api_client":
+        return
+    required = _required_scope(request)
+    if required is None:
+        return
+    scopes = context.scopes or frozenset()
+    namespace = required.split(":", 1)[0]
+    if required not in scopes and f"{namespace}:*" not in scopes and "*" not in scopes:
+        raise HTTPException(status_code=403, detail=f"API Token 缺少权限：{required}")
 
 
 def _fernet() -> Fernet:
@@ -115,11 +157,18 @@ async def _bearer_context(
             raise HTTPException(status_code=403, detail="API Token 不属于该业务空间")
         api_client.last_used_at = datetime.now(UTC)
         await session.commit()
-        return AuthContext(api_client.role, api_client.workspace_id, None, "api_client")  # type: ignore[arg-type]
+        return AuthContext(
+            api_client.role,
+            api_client.workspace_id,
+            None,
+            "api_client",
+            frozenset(api_client.scopes),
+        )  # type: ignore[arg-type]
     raise HTTPException(status_code=401, detail="无效或已过期的访问凭证")
 
 
 async def get_auth_context(
+    request: Request,
     authorization: Annotated[str | None, Header()] = None,
     x_demo_role: Annotated[str | None, Header()] = None,
     x_workspace_id: Annotated[str | None, Header()] = None,
@@ -130,6 +179,7 @@ async def get_auth_context(
         if scheme.lower() != "bearer" or not token:
             raise HTTPException(status_code=401, detail="Authorization 必须使用 Bearer Token")
         context = await _bearer_context(token.strip(), x_workspace_id, session)
+        _enforce_scope(context, request)
         activate_workspace(context.workspace_id)
         return context
     settings = get_settings()

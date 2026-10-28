@@ -5,7 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-MANIFEST_SCHEMA_VERSION = "fde.app/v1"
+MANIFEST_SCHEMA_VERSION = "fde.app/v2"
 
 
 class FDEModel(BaseModel):
@@ -56,8 +56,22 @@ class OutputSpec(FDEModel):
 
 class Tool(FDEModel):
     name: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
+    tool_id: str | None = Field(default=None, max_length=180)
     enabled: bool = True
     config: dict[str, Any] = Field(default_factory=dict)
+
+
+class ModelSettings(FDEModel):
+    temperature: float = Field(default=0.2, ge=0, le=2)
+    max_tokens: int = Field(default=4096, ge=64, le=32768)
+    thinking_mode: Literal["auto", "enabled", "disabled"] = "auto"
+
+
+class AgentSettings(FDEModel):
+    max_steps: int = Field(default=8, ge=1, le=20)
+    require_confirmation_for_side_effects: bool = True
+    show_tool_steps: bool = True
+    long_term_memory: bool = False
 
 
 class Guardrails(FDEModel):
@@ -87,12 +101,14 @@ class Delivery(FDEModel):
 
 
 class Manifest(FDEModel):
-    schema_version: Literal["fde.app/v1"] = MANIFEST_SCHEMA_VERSION
+    schema_version: Literal["fde.app/v1", "fde.app/v2"] = MANIFEST_SCHEMA_VERSION
+    type: Literal["simple", "agent"] = "simple"
     name: str = Field(min_length=1, max_length=180)
     description: str = Field(default="", max_length=4000)
     template_key: str = Field(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9_]*$")
     system_prompt: str = Field(min_length=1, max_length=12000)
     llm_model_id: str | None = Field(default=None, max_length=180)
+    model: ModelSettings = Field(default_factory=ModelSettings)
     knowledge_base_ids: list[str] = Field(default_factory=list, max_length=20)
     input_fields: list[InputField] = Field(default_factory=list, max_length=30)
     output: OutputSpec = Field(default_factory=OutputSpec)
@@ -100,6 +116,7 @@ class Manifest(FDEModel):
     guardrails: Guardrails = Field(default_factory=Guardrails)
     memory: Memory = Field(default_factory=Memory)
     delivery: Delivery = Field(default_factory=Delivery)
+    agent: AgentSettings = Field(default_factory=AgentSettings)
 
     @model_validator(mode="after")
     def validate_unique_entries(self) -> "Manifest":
@@ -113,6 +130,8 @@ class Manifest(FDEModel):
         tool_names = [tool.name for tool in self.tools]
         if len(set(tool_names)) != len(tool_names):
             raise ValueError("tool names cannot contain duplicates")
+        if self.type == "simple" and any(tool.tool_id for tool in self.tools):
+            raise ValueError("external tools require an agent application")
         return self
 
 

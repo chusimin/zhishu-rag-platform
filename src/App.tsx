@@ -10,13 +10,17 @@ import { ChatPage } from './pages/ChatPage';
 import { ChunksPage } from './pages/ChunksPage';
 import { KnowledgeDetailPage } from './pages/KnowledgeDetailPage';
 import { KnowledgePage } from './pages/KnowledgePage';
+import { ImportWizardPage } from './pages/ImportWizardPage';
 import { LogsPage } from './pages/LogsPage';
+import { EvaluationSetsPage } from './pages/EvaluationSetsPage';
 import { LoginPage } from './pages/LoginPage';
 import { FDEStudioPage } from './pages/FDEStudioPage';
-import { PortalPage } from './pages/PortalPage';
+import { PortalPage, SharedPortalPage } from './pages/PortalPage';
 import { ModelsPage } from './pages/ModelsPage';
 import { RetrievalTestPage } from './pages/RetrievalTestPage';
 import { RolePage } from './pages/RolePage';
+import { ToolsPage } from './pages/ToolsPage';
+import { SettingsPage } from './pages/SettingsPage';
 import type { Role } from './types';
 
 const roleStorageKey = 'knowledge-hub-demo-role';
@@ -58,11 +62,14 @@ export default function App() {
         <Route path="/login" element={<LoginPage onLogin={changeRole} />} />
         <Route path="/portal" element={role ? <PortalPage /> : <Navigate to="/login" replace />} />
         <Route path="/portal/apps/:id" element={role ? <PortalPage /> : <Navigate to="/login" replace />} />
+        <Route path="/share/:token" element={<SharedPortalPage />} />
         <Route path="/studio" element={<ProtectedShell role={role} onRoleChange={changeRole}><FDEStudioPage /></ProtectedShell>} />
         <Route path="/agent" element={<ProtectedShell role={role} onRoleChange={changeRole}><AgentAccessPage /></ProtectedShell>} />
         <Route path="/dashboard" element={<ProtectedShell role={role} onRoleChange={changeRole}><DashboardPage role={role!} /></ProtectedShell>} />
         <Route path="/models" element={<ProtectedShell role={role} onRoleChange={changeRole}><ModelsPage /></ProtectedShell>} />
+        <Route path="/tools" element={<ProtectedShell role={role} onRoleChange={changeRole}><ToolsPage /></ProtectedShell>} />
         <Route path="/knowledge" element={<ProtectedShell role={role} onRoleChange={changeRole}><KnowledgePage /></ProtectedShell>} />
+        <Route path="/knowledge/:id/import" element={<ProtectedShell role={role} onRoleChange={changeRole}><ImportWizardPage /></ProtectedShell>} />
         <Route path="/knowledge/:id/chunks" element={<ProtectedShell role={role} onRoleChange={changeRole}><ChunksPage /></ProtectedShell>} />
         <Route path="/knowledge/:id/test" element={<ProtectedShell role={role} onRoleChange={changeRole}><RetrievalTestPage /></ProtectedShell>} />
         <Route path="/knowledge/:id" element={<ProtectedShell role={role} onRoleChange={changeRole}><KnowledgeDetailPage /></ProtectedShell>} />
@@ -70,6 +77,8 @@ export default function App() {
         <Route path="/apps/:id/config" element={<ProtectedShell role={role} onRoleChange={changeRole}><AppConfigPage /></ProtectedShell>} />
         <Route path="/chat" element={<ProtectedShell role={role} onRoleChange={changeRole}><ChatPage /></ProtectedShell>} />
         <Route path="/logs" element={<ProtectedShell role={role} onRoleChange={changeRole}><LogsPage /></ProtectedShell>} />
+        <Route path="/evaluation-sets" element={<ProtectedShell role={role} onRoleChange={changeRole}><EvaluationSetsPage /></ProtectedShell>} />
+        <Route path="/settings" element={<ProtectedShell role={role} onRoleChange={changeRole}><SettingsPage /></ProtectedShell>} />
         <Route path="/" element={<Navigate to={role ? '/dashboard' : '/role'} replace />} />
         <Route path="*" element={<Navigate to={role ? '/dashboard' : '/role'} replace />} />
       </Routes>

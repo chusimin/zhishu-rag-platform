@@ -110,7 +110,7 @@ async def design_manifest(
             (
                 "system",
                 "你是 FDE 应用设计器。只输出一个 JSON 对象，不要 Markdown 代码块或解释。"
-                "对象必须符合 fde.app/v1 Manifest。保留模板协议、字段类型和约束，"
+                "对象必须符合 fde.app/v2 Manifest。保留模板协议、字段类型和约束，"
                 "根据需求改进名称、描述、system_prompt、输入字段、输出与 guardrails。"
                 "template_key 必须保持为 {template_key}，llm_model_id 必须保持为 {llm_model_id}。"
                 "不要虚构模型或知识库 ID。\n基础 Manifest：\n{base_manifest}",

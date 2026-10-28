@@ -1,4 +1,4 @@
-import { BarChart3, Blocks, Database, Eye, EyeOff, LayoutGrid, Settings, Wrench } from 'lucide-react';
+import { Activity, BarChart3, Blocks, ClipboardCheck, Database, Eye, EyeOff, LayoutGrid, Settings, Wrench } from 'lucide-react';
 import type { PropsWithChildren } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import { useAnnotate } from './ui';
@@ -9,6 +9,8 @@ const NAV = [
   { to: '/knowledge', label: '知识库', icon: Database },
   { to: '/tools', label: '工具', icon: Wrench },
   { to: '/insights', label: '看板', icon: BarChart3 },
+  { to: '/observability', label: '可观测', icon: Activity },
+  { to: '/evaluation-sets', label: '评测集', icon: ClipboardCheck },
 ];
 
 export function Shell({ children, bare }: PropsWithChildren<{ bare?: boolean }>) {

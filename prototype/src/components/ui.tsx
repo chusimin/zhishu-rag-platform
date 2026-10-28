@@ -97,13 +97,13 @@ export function Modal({ open, title, onClose, children, footer, wide, icon }: Pr
   );
 }
 
-export function Drawer({ open, title, onClose, children, footer }: PropsWithChildren<{ open: boolean; title: ReactNode; onClose: () => void; footer?: ReactNode }>) {
+export function Drawer({ open, title, onClose, children, footer, wide }: PropsWithChildren<{ open: boolean; title: ReactNode; onClose: () => void; footer?: ReactNode; wide?: boolean }>) {
   useEscape(open, onClose);
   if (!open) return null;
   return (
     <>
       <div className="overlay" style={{ background: 'rgba(16,24,40,.18)' }} onMouseDown={onClose} />
-      <aside className="drawer" role="dialog" aria-modal="true">
+      <aside className={`drawer ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true">
         <div className="modal-head" style={{ borderBottom: '1px solid var(--border)', paddingBottom: 14 }}><h3>{title}</h3><button className="btn ghost sm icon" aria-label="关闭" onClick={onClose}><X size={16} /></button></div>
         <div className="modal-body" style={{ flex: 1, paddingTop: 16 }}>{children}</div>
         {footer ? <div className="modal-foot">{footer}</div> : null}

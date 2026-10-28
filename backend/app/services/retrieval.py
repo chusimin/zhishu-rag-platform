@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any
@@ -24,6 +25,7 @@ class RetrievedChunk:
     content: str
     page_number: int | None
     vector_score: float
+    keyword_score: float | None
     rerank_score: float | None
     final_score: float
     metadata: dict[str, Any]
@@ -52,7 +54,7 @@ def _cosine_similarity(left: list[float], right: list[float]) -> float:
     return dot / (left_norm * right_norm)
 
 
-def _to_result(chunk: DocumentChunk, vector_score: float) -> RetrievedChunk:
+def _to_result(chunk: DocumentChunk, vector_score: float, keyword_score: float | None = None) -> RetrievedChunk:
     parent_content = chunk.metadata_json.get("parent_content")
     content = parent_content if isinstance(parent_content, str) and parent_content.strip() else chunk.content
     parent_title = chunk.metadata_json.get("parent_title")
@@ -65,8 +67,9 @@ def _to_result(chunk: DocumentChunk, vector_score: float) -> RetrievedChunk:
         content=content,
         page_number=chunk.page_number,
         vector_score=vector_score,
+        keyword_score=keyword_score,
         rerank_score=None,
-        final_score=vector_score,
+        final_score=keyword_score if keyword_score is not None else vector_score,
         metadata=chunk.metadata_json,
     )
 
@@ -108,6 +111,55 @@ async def _vector_search(
     return sorted(scored, key=lambda item: item.vector_score, reverse=True)[:top_k]
 
 
+def _lexical_terms(text: str) -> set[str]:
+    lowered = text.lower()
+    words = re.findall(r"[a-z0-9][a-z0-9_.-]*", lowered)
+    chinese = re.findall(r"[\u4e00-\u9fff]", lowered)
+    bigrams = ["".join(chinese[index:index + 2]) for index in range(max(0, len(chinese) - 1))]
+    return set([*words, *chinese, *bigrams])
+
+
+async def _fulltext_search(session: AsyncSession, knowledge_base_id: str, query_text: str, top_k: int) -> list[RetrievedChunk]:
+    chunks = list(await session.scalars(
+        select(DocumentChunk)
+        .where(DocumentChunk.knowledge_base_id == knowledge_base_id)
+        .options(selectinload(DocumentChunk.file))
+        .limit(5000)
+    ))
+    query_terms = _lexical_terms(query_text)
+    if not query_terms:
+        return []
+    scored: list[RetrievedChunk] = []
+    lowered_query = query_text.lower().strip()
+    for chunk in chunks:
+        source = f"{chunk.title}\n{chunk.content}".lower()
+        source_terms = _lexical_terms(source)
+        overlap = len(query_terms & source_terms) / max(len(query_terms), 1)
+        exact_bonus = 0.25 if lowered_query and lowered_query in source else 0.0
+        score = min(1.0, overlap + exact_bonus)
+        if score > 0:
+            scored.append(_to_result(chunk, 0.0, score))
+    return sorted(scored, key=lambda item: item.keyword_score or 0.0, reverse=True)[:top_k]
+
+
+def _rrf(vector: list[RetrievedChunk], keyword: list[RetrievedChunk], top_k: int) -> list[RetrievedChunk]:
+    scores: dict[str, float] = {}
+    by_id: dict[str, RetrievedChunk] = {}
+    for results in (vector, keyword):
+        for rank, item in enumerate(results, start=1):
+            scores[item.chunk_id] = scores.get(item.chunk_id, 0.0) + 1.0 / (60 + rank)
+            current = by_id.get(item.chunk_id)
+            if current is None:
+                by_id[item.chunk_id] = item
+            else:
+                current.vector_score = max(current.vector_score, item.vector_score)
+                current.keyword_score = max(current.keyword_score or 0.0, item.keyword_score or 0.0) or None
+    maximum = max(scores.values(), default=1.0)
+    for chunk_id, item in by_id.items():
+        item.final_score = scores[chunk_id] / maximum
+    return sorted(by_id.values(), key=lambda item: item.final_score, reverse=True)[:top_k]
+
+
 async def retrieve_knowledge_base(
     session: AsyncSession,
     knowledge_base: KnowledgeBase,
@@ -116,23 +168,31 @@ async def retrieve_knowledge_base(
     top_k: int,
     rerank_top_n: int,
     score_threshold: float,
+    mode: str = "semantic",
 ) -> RetrievalRun:
     started = monotonic()
-    if not knowledge_base.embedding_model_id:
-        raise ValueError("Knowledge base has no embedding model configured")
-    embedding_model = await session.get(ModelConfig, knowledge_base.embedding_model_id)
-    if embedding_model is None or not embedding_model.is_enabled:
-        raise ValueError("Configured embedding model is missing or disabled")
-
-    embedding_gateway = build_gateway(embedding_model)
-    embedding_started = monotonic()
-    query_vector = await embedding_gateway.embed_query(query)
-    if knowledge_base.embedding_dimension is not None and len(query_vector) != knowledge_base.embedding_dimension:
-        raise ValueError("Embedding model dimension does not match the knowledge base index; rebuild with a compatible model")
-    embedding_duration_ms = int((monotonic() - embedding_started) * 1000)
+    if mode not in {"semantic", "fulltext", "hybrid"}:
+        raise ValueError("Unsupported retrieval mode")
+    embedding_gateway = None
+    vector_candidates: list[RetrievedChunk] = []
+    embedding_duration_ms = 0
+    if mode in {"semantic", "hybrid"}:
+        if not knowledge_base.embedding_model_id:
+            raise ValueError("Knowledge base has no embedding model configured")
+        embedding_model = await session.get(ModelConfig, knowledge_base.embedding_model_id)
+        if embedding_model is None or not embedding_model.is_enabled:
+            raise ValueError("Configured embedding model is missing or disabled")
+        embedding_gateway = build_gateway(embedding_model)
+        embedding_started = monotonic()
+        query_vector = await embedding_gateway.embed_query(query)
+        if knowledge_base.embedding_dimension is not None and len(query_vector) != knowledge_base.embedding_dimension:
+            raise ValueError("Embedding model dimension does not match the knowledge base index; rebuild with a compatible model")
+        embedding_duration_ms = int((monotonic() - embedding_started) * 1000)
+        vector_candidates = await _vector_search(session, knowledge_base.id, query_vector, top_k)
 
     vector_started = monotonic()
-    candidates = await _vector_search(session, knowledge_base.id, query_vector, top_k)
+    keyword_candidates = await _fulltext_search(session, knowledge_base.id, query, top_k) if mode in {"fulltext", "hybrid"} else []
+    candidates = vector_candidates if mode == "semantic" else keyword_candidates if mode == "fulltext" else _rrf(vector_candidates, keyword_candidates, top_k)
     # Parent-child retrieval embeds small child chunks but returns the parent
     # context. Multiple matching children of one parent should not crowd out
     # results from other parents.
@@ -141,15 +201,15 @@ async def retrieve_knowledge_base(
         parent_id = candidate.metadata.get("parent_id")
         key = f"{candidate.file_id}:{parent_id}" if parent_id else candidate.chunk_id
         current = deduplicated.get(key)
-        if current is None or candidate.vector_score > current.vector_score:
+        if current is None or candidate.final_score > current.final_score:
             deduplicated[key] = candidate
     candidates = list(deduplicated.values())
-    candidates.sort(key=lambda item: item.vector_score, reverse=True)
+    candidates.sort(key=lambda item: item.final_score, reverse=True)
     vector_duration_ms = int((monotonic() - vector_started) * 1000)
     recalled_count = len(candidates)
     rerank_duration_ms: int | None = None
     rerank_applied = False
-    simulated = embedding_gateway.is_simulated
+    simulated = bool(embedding_gateway and embedding_gateway.is_simulated)
 
     if candidates and knowledge_base.rerank_model_id:
         rerank_model = await session.get(ModelConfig, knowledge_base.rerank_model_id)

@@ -78,6 +78,22 @@ async def test_retrieval_applies_mock_embedding_and_rerank(client: AsyncClient) 
     assert body["results"][0]["rerank_score"] is not None
     assert body["results"][0]["filename"] == "travel.md"
 
+    fulltext = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/retrieval-test",
+        headers=MANAGER,
+        json={"query": "行程单", "mode": "fulltext", "top_k": 8, "rerank_top_n": 3, "score_threshold": 0},
+    )
+    assert fulltext.status_code == 200, fulltext.text
+    assert fulltext.json()["results"][0]["keyword_score"] > 0
+
+    hybrid = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/retrieval-test",
+        headers=MANAGER,
+        json={"query": "差旅审批", "mode": "hybrid", "top_k": 8, "rerank_top_n": 3, "score_threshold": 0},
+    )
+    assert hybrid.status_code == 200, hybrid.text
+    assert hybrid.json()["returned_count"] >= 1
+
 
 async def test_qa_app_crud_and_user_visibility(client: AsyncClient) -> None:
     embedding_id = await _model(client, "embedding")

@@ -16,6 +16,46 @@ from .parsers import ParsedDocument
 SEPARATORS = ["\n## ", "\n### ", "\n\n", "\n", "。", "；", ";", " "]
 
 
+def normalize_chunk_config(
+    values: dict[str, Any] | None,
+    *,
+    default_method: str,
+    default_chunk_size: int,
+    default_chunk_overlap: int,
+    default_parent_chunk_size: int,
+    default_child_chunk_size: int,
+) -> dict[str, Any]:
+    raw = values or {}
+    method = str(raw.get("method", default_method))
+    allowed = {item.value for item in ChunkMethod}
+    if method not in allowed:
+        raise ValueError("不支持的切块方式")
+    try:
+        chunk_size = max(50, min(int(raw.get("chunk_size", default_chunk_size)), 12000))
+        chunk_overlap = max(0, min(int(raw.get("chunk_overlap", default_chunk_overlap)), 1000))
+        parent_chunk_size = max(200, min(int(raw.get("parent_chunk_size", default_parent_chunk_size)), 12000))
+        child_chunk_size = max(80, min(int(raw.get("child_chunk_size", default_child_chunk_size)), 4000))
+        heading_level = max(1, min(int(raw.get("heading_level", 3)), 6))
+        rows_per_chunk = max(1, min(int(raw.get("rows_per_chunk", 1)), 20))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("切块配置包含无效数字") from exc
+    if chunk_overlap >= chunk_size:
+        raise ValueError("chunk_overlap must be smaller than chunk_size")
+    if method == ChunkMethod.PARENT_CHILD and child_chunk_size >= parent_chunk_size:
+        raise ValueError("child_chunk_size must be smaller than parent_chunk_size")
+    separators = [str(item) for item in raw.get("separators", []) if str(item)][:20]
+    return {
+        "method": method,
+        "chunk_size": chunk_size,
+        "chunk_overlap": chunk_overlap,
+        "parent_chunk_size": parent_chunk_size,
+        "child_chunk_size": child_chunk_size,
+        "separators": separators,
+        "heading_level": heading_level,
+        "rows_per_chunk": rows_per_chunk,
+    }
+
+
 def _derive_title(content: str, fallback: str) -> str:
     for line in content.splitlines():
         candidate = re.sub(r"^[#\-*\d.\s]+", "", line).strip()
@@ -24,12 +64,12 @@ def _derive_title(content: str, fallback: str) -> str:
     return fallback
 
 
-def _splitter(chunk_size: int, chunk_overlap: int) -> RecursiveCharacterTextSplitter:
+def _splitter(chunk_size: int, chunk_overlap: int, separators: list[str] | None = None) -> RecursiveCharacterTextSplitter:
     return RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap,
         length_function=len,
-        separators=SEPARATORS,
+        separators=separators or SEPARATORS,
     )
 
 
@@ -64,6 +104,73 @@ def _recursive_chunks(parsed: ParsedDocument, chunk_size: int, chunk_overlap: in
                 )
             )
     return chunks
+
+
+def _direct_chunks(parsed: ParsedDocument, method: str) -> list[Document]:
+    chunks: list[Document] = []
+    for unit_index, unit in enumerate(parsed.units):
+        content = unit.content.strip()
+        if not content:
+            continue
+        chunks.append(Document(page_content=content, metadata={**_base_metadata(parsed, unit_index, unit), "chunk_method": method, "title": unit.title or _derive_title(content, f"分块 {unit_index + 1}")}))
+    return chunks
+
+
+def _heading_chunks(parsed: ParsedDocument, chunk_size: int, heading_level: int) -> list[Document]:
+    chunks: list[Document] = []
+    pattern = re.compile(rf"(?m)^(?=#{{1,{max(1, min(heading_level, 6))}}}\s+)")
+    for unit_index, unit in enumerate(parsed.units):
+        sections = [item.strip() for item in pattern.split(unit.content) if item.strip()]
+        if len(sections) <= 1:
+            sections = [unit.content]
+        for section_index, section in enumerate(sections):
+            for split_index, content in enumerate(_splitter(chunk_size, 0).split_text(section)):
+                chunks.append(Document(page_content=content.strip(), metadata={**_base_metadata(parsed, unit_index, unit), "chunk_method": ChunkMethod.HEADING, "section_index": section_index, "split_index": split_index, "title": _derive_title(section, unit.title or f"章节 {section_index + 1}")}))
+    return chunks
+
+
+def _table_row_chunks(parsed: ParsedDocument, rows_per_chunk: int) -> list[Document]:
+    chunks: list[Document] = []
+    batch_size = max(1, min(rows_per_chunk, 20))
+    for unit_index, unit in enumerate(parsed.units):
+        lines = [line.strip() for line in unit.content.splitlines() if line.strip()]
+        table_lines = [line for line in lines if line.startswith("|") and line.endswith("|")]
+        if len(table_lines) < 3:
+            content = unit.content.strip()
+            if content:
+                chunks.append(
+                    Document(
+                        page_content=content,
+                        metadata={
+                            **_base_metadata(parsed, unit_index, unit),
+                            "chunk_method": ChunkMethod.TABLE_ROW,
+                            "title": unit.title or _derive_title(content, f"分块 {unit_index + 1}"),
+                        },
+                    )
+                )
+            continue
+        header = table_lines[0]
+        rows = table_lines[2:]
+        for start in range(0, len(rows), batch_size):
+            content = "\n".join([header, table_lines[1], *rows[start:start + batch_size]])
+            chunks.append(Document(page_content=content, metadata={**_base_metadata(parsed, unit_index, unit), "chunk_method": ChunkMethod.TABLE_ROW, "row_start": start + 1, "title": f"{unit.title or '表格'} · 第 {start + 1} 行"}))
+    return chunks
+
+
+def _qa_chunks(parsed: ParsedDocument) -> list[Document]:
+    chunks: list[Document] = []
+    for unit_index, unit in enumerate(parsed.units):
+        lines = [line.strip().strip("|") for line in unit.content.splitlines() if line.strip().startswith("|")]
+        rows = [[cell.strip() for cell in line.split("|")] for line in lines]
+        for row_index, row in enumerate(rows[2:] if len(rows) >= 3 else []):
+            if len(row) < 2 or not row[0] or not row[1]:
+                continue
+            content = f"问题：{row[0]}\n答案：{row[1]}"
+            metadata = {**_base_metadata(parsed, unit_index, unit), "chunk_method": ChunkMethod.QA, "question": row[0], "title": row[0]}
+            if len(row) > 2 and row[2]:
+                metadata["alternative_questions"] = [item.strip() for item in re.split(r"[|；;]", row[2]) if item.strip()]
+            chunks.append(Document(page_content=content, metadata=metadata))
+    return chunks or _direct_chunks(parsed, ChunkMethod.QA)
 
 
 def _parent_child_chunks(
@@ -196,7 +303,51 @@ async def split_document(
     parent_chunk_size: int = 1600,
     child_chunk_size: int = 400,
     semantic_gateway: ModelGateway | None = None,
+    separators: list[str] | None = None,
+    heading_level: int = 3,
+    rows_per_chunk: int = 1,
 ) -> list[Document]:
+    if chunk_method == ChunkMethod.HEADING:
+        return _heading_chunks(parsed, chunk_size, heading_level)
+    if chunk_method == ChunkMethod.SEPARATOR:
+        custom = [item for item in (separators or []) if item]
+        if not custom:
+            return _recursive_chunks(parsed, chunk_size, chunk_overlap)
+        chunks: list[Document] = []
+        for unit_index, unit in enumerate(parsed.units):
+            for content in _splitter(chunk_size, chunk_overlap, custom + [""]).split_text(unit.content):
+                normalized = content.strip()
+                if normalized:
+                    chunks.append(
+                        Document(
+                            page_content=normalized,
+                            metadata={
+                                **_base_metadata(parsed, unit_index, unit),
+                                "chunk_method": ChunkMethod.SEPARATOR,
+                                "title": _derive_title(normalized, unit.title or "自定义分块"),
+                            },
+                        )
+                    )
+        return chunks
+    if chunk_method == ChunkMethod.FIXED:
+        chunks = []
+        for unit_index, unit in enumerate(parsed.units):
+            for split_index, content in enumerate(
+                _splitter(chunk_size, chunk_overlap, [""]).split_text(unit.content)
+            ):
+                normalized = content.strip()
+                if normalized:
+                    chunks.append(
+                        Document(
+                            page_content=normalized,
+                            metadata={
+                                **_base_metadata(parsed, unit_index, unit),
+                                "chunk_method": ChunkMethod.FIXED,
+                                "title": unit.title or f"分块 {split_index + 1}",
+                            },
+                        )
+                    )
+        return chunks
     if chunk_method == ChunkMethod.PARENT_CHILD:
         return _parent_child_chunks(
             parsed,
@@ -212,4 +363,10 @@ async def split_document(
             gateway=semantic_gateway,
             safe_input_size=max(2000, min(parent_chunk_size, 8000)),
         )
+    if chunk_method == ChunkMethod.PAGE:
+        return _direct_chunks(parsed, ChunkMethod.PAGE)
+    if chunk_method == ChunkMethod.TABLE_ROW:
+        return _table_row_chunks(parsed, rows_per_chunk)
+    if chunk_method == ChunkMethod.QA:
+        return _qa_chunks(parsed)
     return _recursive_chunks(parsed, chunk_size, chunk_overlap)

@@ -204,9 +204,16 @@ class KnowledgeFileResponse(ORMModel):
     error_message: str | None
     page_count: int | None
     chunk_count: int
+    chunk_config: dict[str, Any]
     document_metadata: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+
+
+class WebImportRequest(BaseModel):
+    url: HttpUrl
+    title: str | None = Field(default=None, max_length=300)
+    chunk_config: dict[str, Any] = Field(default_factory=dict)
 
 
 class DocumentMetadataUpdate(BaseModel):
@@ -260,6 +267,7 @@ class ChunkUpdate(BaseModel):
 
 class RetrievalRequest(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
+    mode: Literal["semantic", "fulltext", "hybrid"] = "semantic"
     top_k: int = Field(default=8, ge=1, le=50)
     rerank_top_n: int = Field(default=3, ge=1, le=20)
     score_threshold: float = Field(default=0.0, ge=-1.0, le=1.0)
@@ -280,6 +288,7 @@ class RetrievalResultResponse(BaseModel):
     content: str
     page_number: int | None
     vector_score: float
+    keyword_score: float | None
     rerank_score: float | None
     final_score: float
     metadata: dict[str, Any]

@@ -1,7 +1,9 @@
 import type { Role } from '../types';
 
-const defaultApiHost = typeof window === 'undefined' ? '127.0.0.1' : window.location.hostname;
-export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? `http://${defaultApiHost}:8001/api/v1`;
+// Development uses Vite's same-origin proxy so modern Chromium Local Network
+// Access rules do not block a cross-port loopback request. Deployments can
+// still point at a separate API origin explicitly.
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '/api/v1';
 const roleStorageKey = 'knowledge-hub-demo-role';
 
 export class ApiError extends Error {
@@ -90,6 +92,33 @@ export interface ApiModelOption {
   connection_status: ApiModelConfig['connection_status'];
 }
 
+export interface ApiToolConfig {
+  id: string;
+  name: string;
+  kind: 'http' | 'mcp' | 'workflow';
+  description: string;
+  config: {
+    method?: string;
+    url?: string;
+    parameters?: Record<string, unknown>;
+    headers?: Record<string, string>;
+    query?: Record<string, unknown>;
+    body?: unknown;
+    response_path?: string;
+    auth_type?: 'none' | 'bearer' | 'api_key';
+    auth_header?: string;
+    allow_private_network?: boolean;
+    timeout_seconds?: number;
+  };
+  has_secret: boolean;
+  is_enabled: boolean;
+  connection_status: 'untested' | 'connected' | 'error';
+  last_tested_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface ApiKnowledgeBase {
   id: string;
   name: string;
@@ -99,7 +128,7 @@ export interface ApiKnowledgeBase {
   ocr_model_id: string | null;
   chunk_size: number;
   chunk_overlap: number;
-  chunk_method: 'recursive' | 'parent_child' | 'semantic';
+  chunk_method: 'recursive' | 'heading' | 'separator' | 'fixed' | 'parent_child' | 'semantic' | 'page' | 'table_row' | 'qa';
   parent_chunk_size: number;
   child_chunk_size: number;
   semantic_llm_model_id: string | null;
@@ -122,6 +151,7 @@ export interface ApiKnowledgeFile {
   error_message: string | null;
   page_count: number | null;
   chunk_count: number;
+  chunk_config: ApiChunkConfig;
   document_metadata: {
     document_time?: string | null;
     version?: string | null;
@@ -136,6 +166,33 @@ export interface ApiKnowledgeFile {
   };
   created_at: string;
   updated_at: string;
+}
+
+export interface ApiChunkConfig {
+  method: ApiKnowledgeBase['chunk_method'];
+  chunk_size: number;
+  chunk_overlap: number;
+  parent_chunk_size: number;
+  child_chunk_size: number;
+  separators: string[];
+  heading_level: number;
+  rows_per_chunk: number;
+}
+
+export interface ApiChunkPreview {
+  filename: string;
+  method: ApiKnowledgeBase['chunk_method'];
+  total_chunks: number;
+  returned_chunks: number;
+  page_count: number | null;
+  warnings: string[];
+  chunks: Array<{
+    ordinal: number;
+    title: string;
+    content: string;
+    char_count: number;
+    metadata: Record<string, unknown>;
+  }>;
 }
 
 export interface ApiImportJob {
@@ -177,6 +234,7 @@ export interface ApiRetrievalResult {
   content: string;
   page_number: number | null;
   vector_score: number;
+  keyword_score: number | null;
   rerank_score: number | null;
   final_score: number;
   metadata: Record<string, unknown>;
@@ -294,6 +352,72 @@ export interface ApiLogSummary {
   output_tokens: number;
   total_tokens: number;
   average_duration_ms: number | null;
+}
+
+export interface ApiEvaluationRun {
+  id: string;
+  status: 'running' | 'success' | 'failed';
+  passed_count: number;
+  failed_count: number;
+  simulated: boolean;
+  results: Array<{
+    case_id: string;
+    name: string;
+    passed: boolean;
+    reasons: string[];
+    output: string;
+    simulated: boolean;
+  }>;
+  created_at: string;
+}
+
+export interface ApiEvaluationCase {
+  id: string;
+  suite_id: string;
+  name: string;
+  case_type: 'good' | 'bad' | 'manual';
+  readiness: 'ready' | 'needs_standard';
+  message: string;
+  input_values: Record<string, unknown>;
+  actual_output: string;
+  expected_output: string;
+  expected_keywords: string[];
+  forbidden_keywords: string[];
+  require_citations: boolean;
+  tags: string[];
+  source_log_id: string | null;
+  source_trace_id: string | null;
+  source_conversation_id: string | null;
+  source_snapshot: {
+    captured_from?: string;
+    trace_id?: string;
+    application?: { id: string; name: string };
+    app_version?: { id: string; version: number; release_notes: string } | null;
+    model?: { provider?: string; model?: string; simulated?: boolean } | null;
+    channel?: string;
+    started_at?: string;
+    trace?: Array<{ ordinal: number; name: string; status: string; duration_ms: number; detail: string; metadata: Record<string, unknown> }>;
+  };
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ApiEvaluationSet {
+  id: string;
+  app_id: string;
+  app_name: string;
+  name: string;
+  description: string;
+  is_release_gate: boolean;
+  case_count: number;
+  ready_count: number;
+  needs_standard_count: number;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+  latest_run: ApiEvaluationRun | null;
+  cases?: ApiEvaluationCase[];
 }
 
 export type SseEvent =

@@ -10,7 +10,7 @@ from sqlalchemy.orm import selectinload
 from ..config import get_settings
 from ..models import DocumentChunk, ImportJob, JobStatus, KnowledgeBase, KnowledgeFile, ModelConfig
 from ..providers import build_gateway
-from .chunking import split_document
+from .chunking import normalize_chunk_config, split_document
 from .metadata_extraction import build_embedding_text, extract_document_metadata
 from .ocr import build_ocr, get_ocr
 from .parsers import parse_bytes
@@ -200,6 +200,10 @@ async def process_import_job(
                 gateway=metadata_gateway,
                 model_id=knowledge_base.metadata_llm_model_id,
             )
+            document_metadata = {
+                **{key: value for key, value in (file.document_metadata or {}).items() if key.startswith("source_")},
+                **document_metadata,
+            }
             file.document_metadata = document_metadata
         if parsed.warnings:
             document_metadata = {
@@ -218,8 +222,16 @@ async def process_import_job(
             stage="chunking",
             detail="使用 LangChain 结构化分块",
         )
+        chunk_config = normalize_chunk_config(
+            file.chunk_config,
+            default_method=knowledge_base.chunk_method,
+            default_chunk_size=knowledge_base.chunk_size,
+            default_chunk_overlap=knowledge_base.chunk_overlap,
+            default_parent_chunk_size=knowledge_base.parent_chunk_size,
+            default_child_chunk_size=knowledge_base.child_chunk_size,
+        )
         semantic_gateway = None
-        if knowledge_base.chunk_method == "semantic":
+        if chunk_config["method"] == "semantic":
             if not knowledge_base.semantic_llm_model_id:
                 raise ValueError("Semantic chunking requires an LLM model")
             semantic_model = await session.get(ModelConfig, knowledge_base.semantic_llm_model_id)
@@ -228,12 +240,15 @@ async def process_import_job(
             semantic_gateway = build_gateway(semantic_model)
         documents = await split_document(
             parsed,
-            chunk_method=knowledge_base.chunk_method,
-            chunk_size=knowledge_base.chunk_size,
-            chunk_overlap=knowledge_base.chunk_overlap,
-            parent_chunk_size=knowledge_base.parent_chunk_size,
-            child_chunk_size=knowledge_base.child_chunk_size,
+            chunk_method=chunk_config["method"],
+            chunk_size=chunk_config["chunk_size"],
+            chunk_overlap=chunk_config["chunk_overlap"],
+            parent_chunk_size=chunk_config["parent_chunk_size"],
+            child_chunk_size=chunk_config["child_chunk_size"],
             semantic_gateway=semantic_gateway,
+            separators=chunk_config["separators"],
+            heading_level=chunk_config["heading_level"],
+            rows_per_chunk=chunk_config["rows_per_chunk"],
         )
         if not documents:
             raise ValueError("No chunks were produced from the parsed document")

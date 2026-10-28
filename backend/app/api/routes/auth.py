@@ -9,7 +9,7 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...db import get_session
-from ...models import ApiClient, AuthSession, Membership, User, Workspace
+from ...models import ApiClient, AuditEvent, AuthSession, Membership, User, Workspace
 from ...security import (
     AuthContext,
     get_auth_context,
@@ -45,7 +45,24 @@ class WorkspaceCreate(BaseModel):
 class ApiClientCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     role: Literal["admin", "manager"] = "manager"
-    scopes: list[str] = Field(default_factory=lambda: ["apps:read", "apps:write", "apps:run"])
+    scopes: list[str] = Field(
+        default_factory=lambda: [
+            "apps:read",
+            "apps:write",
+            "apps:run",
+            "apps:evaluate",
+            "knowledge:read",
+            "knowledge:write",
+            "models:read",
+            "tools:read",
+            "tools:write",
+            "logs:read",
+        ]
+    )
+
+
+class MembershipUpdate(BaseModel):
+    role: Literal["admin", "manager", "user"]
 
 
 def user_payload(user: User, memberships: list[Membership]) -> dict:
@@ -142,8 +159,70 @@ async def create_user(
     if membership:
         raise HTTPException(status_code=409, detail="用户已在当前业务空间")
     session.add(Membership(workspace_id=context.workspace_id, user_id=user.id, role=payload.role))
+    session.add(AuditEvent(workspace_id=context.workspace_id, actor_id=context.user_id, action="member.invited", resource_type="user", resource_id=user.id, detail={"email": user.email, "role": payload.role}))
     await session.commit()
     return {"id": user.id, "email": user.email, "display_name": user.display_name, "role": payload.role}
+
+
+@router.get("/users")
+async def list_users(
+    context: AuthContext = Depends(require_roles("admin")),
+    session: AsyncSession = Depends(get_session),
+) -> list[dict]:
+    rows = await session.execute(
+        select(User, Membership)
+        .join(Membership, Membership.user_id == User.id)
+        .where(Membership.workspace_id == context.workspace_id)
+        .order_by(User.display_name, User.email)
+    )
+    return [
+        {
+            "id": user.id,
+            "email": user.email,
+            "display_name": user.display_name,
+            "is_active": user.is_active,
+            "role": membership.role,
+            "joined_at": membership.created_at,
+        }
+        for user, membership in rows.all()
+    ]
+
+
+@router.patch("/users/{user_id}")
+async def update_user_membership(
+    user_id: str,
+    payload: MembershipUpdate,
+    context: AuthContext = Depends(require_roles("admin")),
+    session: AsyncSession = Depends(get_session),
+) -> dict:
+    membership = await session.scalar(select(Membership).where(Membership.workspace_id == context.workspace_id, Membership.user_id == user_id))
+    user = await session.get(User, user_id)
+    if not membership or not user:
+        raise HTTPException(status_code=404, detail="成员不存在")
+    if context.user_id == user_id and payload.role != "admin":
+        raise HTTPException(status_code=409, detail="不能降低当前登录管理员自己的权限")
+    previous = membership.role
+    membership.role = payload.role
+    session.add(AuditEvent(workspace_id=context.workspace_id, actor_id=context.user_id, action="member.role_updated", resource_type="user", resource_id=user.id, detail={"from": previous, "to": payload.role}))
+    await session.commit()
+    return {"id": user.id, "email": user.email, "display_name": user.display_name, "role": membership.role}
+
+
+@router.delete("/users/{user_id}", status_code=204)
+async def remove_user_membership(
+    user_id: str,
+    context: AuthContext = Depends(require_roles("admin")),
+    session: AsyncSession = Depends(get_session),
+) -> Response:
+    if context.user_id == user_id:
+        raise HTTPException(status_code=409, detail="不能将当前登录管理员移出业务空间")
+    membership = await session.scalar(select(Membership).where(Membership.workspace_id == context.workspace_id, Membership.user_id == user_id))
+    if not membership:
+        raise HTTPException(status_code=404, detail="成员不存在")
+    session.add(AuditEvent(workspace_id=context.workspace_id, actor_id=context.user_id, action="member.removed", resource_type="user", resource_id=user_id, detail={}))
+    await session.delete(membership)
+    await session.commit()
+    return Response(status_code=204)
 
 
 @router.get("/api-clients")
@@ -164,6 +243,8 @@ async def create_api_client(
     token = issue_token()
     client = ApiClient(workspace_id=context.workspace_id, name=payload.name, role=payload.role, scopes=payload.scopes, token_hash=hash_token(token))
     session.add(client)
+    await session.flush()
+    session.add(AuditEvent(workspace_id=context.workspace_id, actor_id=context.user_id, action="api_client.created", resource_type="api_client", resource_id=client.id, detail={"name": client.name, "scopes": client.scopes}))
     await session.commit()
     return {"id": client.id, "name": client.name, "token": token, "workspace_id": client.workspace_id, "scopes": client.scopes}
 
@@ -178,5 +259,6 @@ async def revoke_api_client(
     if not client or client.workspace_id != context.workspace_id:
         raise HTTPException(status_code=404, detail="API 客户端不存在")
     client.revoked_at = datetime.now(UTC)
+    session.add(AuditEvent(workspace_id=context.workspace_id, actor_id=context.user_id, action="api_client.revoked", resource_type="api_client", resource_id=client.id, detail={"name": client.name}))
     await session.commit()
     return Response(status_code=204)

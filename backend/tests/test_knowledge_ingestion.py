@@ -273,3 +273,73 @@ async def test_metadata_llm_is_persisted_indexed_and_manually_editable(client: A
     )
     assert refreshed_chunks.json()[0]["indexed"] is True
     assert refreshed_chunks.json()[0]["metadata_json"]["document_metadata"]["owner"] == "大客户业务部"
+
+
+async def test_file_chunk_config_is_persisted_and_used_for_ingestion(client: AsyncClient) -> None:
+    embedding_model_id = await _create_mock_embedding(client)
+    created = await client.post(
+        "/api/v1/knowledge-bases",
+        headers=MANAGER_HEADERS,
+        json={
+            "name": "逐文件切块验收库",
+            "embedding_model_id": embedding_model_id,
+            "chunk_size": 800,
+            "chunk_overlap": 120,
+        },
+    )
+    assert created.status_code == 201, created.text
+    knowledge_base_id = created.json()["id"]
+    chunk_config = {
+        "method": "fixed",
+        "chunk_size": 100,
+        "chunk_overlap": 0,
+        "parent_chunk_size": 500,
+        "child_chunk_size": 100,
+        "separators": ["\n\n", "\n"],
+        "heading_level": 2,
+        "rows_per_chunk": 1,
+    }
+    content = "# 验收文档\n\n" + "A" * 260
+
+    preview = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/chunk-preview",
+        headers=MANAGER_HEADERS,
+        files={"upload": ("preview.md", content.encode(), "text/markdown")},
+        data={"config": json.dumps(chunk_config)},
+    )
+    assert preview.status_code == 200, preview.text
+    assert preview.json()["method"] == "fixed"
+    assert preview.json()["total_chunks"] >= 3
+
+    uploaded = await client.post(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/files",
+        headers=MANAGER_HEADERS,
+        files={"upload": ("fixed.md", content.encode(), "text/markdown")},
+        data={"config": json.dumps(chunk_config)},
+    )
+    assert uploaded.status_code == 202, uploaded.text
+    assert uploaded.json()["file"]["chunk_config"] == chunk_config
+    assert uploaded.json()["file"]["chunk_count"] == preview.json()["total_chunks"]
+    listed = await client.get(
+        f"/api/v1/knowledge-bases/{knowledge_base_id}/files",
+        headers=MANAGER_HEADERS,
+    )
+    assert listed.status_code == 200, listed.text
+    assert listed.json()[0]["chunk_config"] == chunk_config
+
+
+async def test_web_import_rejects_private_network_urls(client: AsyncClient) -> None:
+    embedding_model_id = await _create_mock_embedding(client)
+    created = await client.post(
+        "/api/v1/knowledge-bases",
+        headers=MANAGER_HEADERS,
+        json={"name": "网页安全验收库", "embedding_model_id": embedding_model_id},
+    )
+    assert created.status_code == 201, created.text
+    response = await client.post(
+        f"/api/v1/knowledge-bases/{created.json()['id']}/web-import",
+        headers=MANAGER_HEADERS,
+        json={"url": "http://127.0.0.1:9999/internal", "title": "不应导入"},
+    )
+    assert response.status_code == 422, response.text
+    assert "内网或保留地址" in response.json()["detail"]

@@ -19,7 +19,7 @@ export function AgentAccessPage() {
 
   const create = async () => {
     try {
-      const response = await apiFetch<{ token: string }>('/auth/api-clients', { method: 'POST', body: JSON.stringify({ name, role: 'manager', scopes: ['apps:read', 'apps:write', 'apps:run'] }) });
+      const response = await apiFetch<{ token: string }>('/auth/api-clients', { method: 'POST', body: JSON.stringify({ name, role: 'manager', scopes: ['apps:read', 'apps:write', 'apps:run', 'apps:evaluate', 'knowledge:read', 'knowledge:write', 'models:read', 'tools:read', 'tools:write', 'logs:read'] }) });
       setToken(response.token);
       await load();
     } catch (caught) { setError(errorMessage(caught)); }
