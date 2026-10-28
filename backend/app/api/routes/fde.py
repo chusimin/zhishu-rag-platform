@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ...db import get_session
-from ...fde import Manifest, list_templates, manifest_from_qa_app, validate_for_publish, validate_manifest
+from ...fde import Manifest, list_templates, manifest_fingerprint, manifest_from_qa_app, validate_for_publish, validate_manifest
 from ...fde.designer import DesignError, design_manifest
 from ...fde.runtime import estimate_cost, execute_manifest
 from ...models import (
@@ -59,6 +59,10 @@ class VersionRequest(BaseModel):
 
 class VersionCreateRequest(BaseModel):
     release_notes: str = Field(default="", max_length=4000)
+
+
+class ReleaseRequest(BaseModel):
+    release_notes: str = Field(min_length=1, max_length=4000)
 
 
 class RunRequest(BaseModel):
@@ -414,7 +418,35 @@ async def create_version(app_id: str, payload: VersionCreateRequest | None = Non
     return _version_payload(version)
 
 
-async def _publish(app: QAApp, version_id: str | None, context: AuthContext, session: AsyncSession) -> dict[str, Any]:
+@router.post("/apps/{app_id}/release")
+async def release(app_id: str, payload: ReleaseRequest, context: AuthContext = Depends(require_roles("admin", "manager")), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
+    """Freeze the draft and publish it in one step; nothing is persisted if validation or the gate fails.
+
+    If the draft is identical to the latest version, that version is published instead of creating a duplicate.
+    """
+    app = await _app(session, app_id, context.workspace_id)
+    draft = _draft(app).model_dump(mode="json")
+    latest = await session.scalar(select(AppVersion).where(AppVersion.app_id == app.id).order_by(AppVersion.version.desc()).limit(1))
+    if latest and manifest_fingerprint(latest.manifest) == manifest_fingerprint(draft):
+        return await _publish(app, latest.id, context, session)
+    models, knowledge, tools = await _resource_ids(session, context.workspace_id)
+    validation = validate_for_publish(_draft(app), models, knowledge, tools)
+    if not validation.valid:
+        raise HTTPException(status_code=422, detail={"message": "草稿校验未通过", "issues": [item.model_dump() for item in validation.issues]})
+    version = AppVersion(app_id=app.id, version=(latest.version if latest else 0) + 1, manifest=draft, release_notes=payload.release_notes, created_by=context.user_id)
+    session.add(version)
+    await session.flush()
+    try:
+        result = await _publish(app, version.id, context, session)
+    except HTTPException:
+        await session.rollback()
+        raise
+    await _audit(session, context, "application.version_created", app.id, {"version": version.version})
+    await session.commit()
+    return result
+
+
+async def _publish(app: QAApp, version_id: str | None, context: AuthContext, session: AsyncSession, *, enforce_gate: bool = True) -> dict[str, Any]:
     version = await session.scalar(select(AppVersion).where(AppVersion.app_id == app.id, AppVersion.id == version_id)) if version_id else await session.scalar(select(AppVersion).where(AppVersion.app_id == app.id).order_by(AppVersion.version.desc()).limit(1))
     if not version:
         raise HTTPException(status_code=422, detail="请先创建应用版本")
@@ -422,19 +454,24 @@ async def _publish(app: QAApp, version_id: str | None, context: AuthContext, ses
     validation = validate_for_publish(version.manifest, models, knowledge, tools)
     if not validation.valid:
         raise HTTPException(status_code=422, detail={"message": "发布校验未通过", "issues": [item.model_dump() for item in validation.issues]})
-    release_suite_ids = list(
-        await session.scalars(
-            select(EvaluationSuite.id).where(
-                EvaluationSuite.app_id == app.id,
-                EvaluationSuite.is_release_gate.is_(True),
+    # 每个门禁评测集各自检查：最近一次运行必须覆盖该集全部 Case 且无失败。
+    # 回滚切回的是已发布过的版本，不受当前草稿的评测结果约束。
+    if enforce_gate:
+        gate_suites = list(
+            await session.scalars(
+                select(EvaluationSuite).where(
+                    EvaluationSuite.app_id == app.id,
+                    EvaluationSuite.is_release_gate.is_(True),
+                )
             )
         )
-    )
-    if release_suite_ids:
-        latest = await session.scalar(select(EvaluationRun).where(EvaluationRun.suite_id.in_(release_suite_ids)).order_by(EvaluationRun.created_at.desc()).limit(1))
-        case_count = await session.scalar(select(func.count()).select_from(EvaluationCase).where(EvaluationCase.suite_id.in_(release_suite_ids)))
-        if not latest or latest.failed_count or latest.passed_count < (case_count or 0):
-            raise HTTPException(status_code=409, detail="发布质量门禁未通过：请先运行全部评测并确保通过")
+        for suite in gate_suites:
+            latest = await session.scalar(select(EvaluationRun).where(EvaluationRun.suite_id == suite.id).order_by(EvaluationRun.created_at.desc()).limit(1))
+            case_count = await session.scalar(select(func.count()).select_from(EvaluationCase).where(EvaluationCase.suite_id == suite.id)) or 0
+            if not latest or latest.failed_count or latest.passed_count < case_count:
+                raise HTTPException(status_code=409, detail=f"发布质量门禁未通过：请先运行评测集「{suite.name}」并确保全部通过")
+            if latest.manifest_hash != manifest_fingerprint(version.manifest):
+                raise HTTPException(status_code=409, detail=f"发布质量门禁未通过：评测集「{suite.name}」的最近结果不是基于当前配置，请重新运行")
     app.published_version_id = version.id
     app.is_enabled = True
     app.status = "published"
@@ -452,7 +489,7 @@ async def publish(app_id: str, payload: VersionRequest | None = None, context: A
 async def rollback(app_id: str, payload: VersionRequest, context: AuthContext = Depends(require_roles("admin", "manager")), session: AsyncSession = Depends(get_session)) -> dict[str, Any]:
     if not payload.version_id:
         raise HTTPException(status_code=422, detail="回滚必须指定 version_id")
-    result = await _publish(await _app(session, app_id, context.workspace_id), payload.version_id, context, session)
+    result = await _publish(await _app(session, app_id, context.workspace_id), payload.version_id, context, session, enforce_gate=False)
     await _audit(session, context, "application.rolled_back", app_id, {"version_id": payload.version_id})
     await session.commit()
     return result
@@ -701,7 +738,7 @@ async def evaluate(app_id: str, context: AuthContext = Depends(require_roles("ad
     if not suite or not suite.cases:
         raise HTTPException(status_code=422, detail="请先创建评测集")
     manifest = _draft(app)
-    run = EvaluationRun(suite_id=suite.id, status=RunStatus.RUNNING)
+    run = EvaluationRun(suite_id=suite.id, status=RunStatus.RUNNING, manifest_hash=manifest_fingerprint(manifest))
     results: list[dict[str, Any]] = []
     for case in suite.cases:
         reasons: list[str] = []

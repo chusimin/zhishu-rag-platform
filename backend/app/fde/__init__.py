@@ -1,4 +1,5 @@
 from .manifest import (
+    manifest_fingerprint,
     MANIFEST_SCHEMA_VERSION,
     Delivery,
     Guardrails,
@@ -31,6 +32,7 @@ from .validation import (
 )
 
 __all__ = [
+    "manifest_fingerprint",
     "MANIFEST_SCHEMA_VERSION",
     "LEGACY_SCENARIO_TEMPLATE_KEYS",
     "TEMPLATES",

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -174,3 +176,9 @@ def validate_input_value(field: InputField, value: Any, path: str = "value") -> 
         raise ValueError(f"{path} cannot exceed 1000 characters")
     if field.type == "textarea" and len(value) > 20000:
         raise ValueError(f"{path} cannot exceed 20000 characters")
+
+
+def manifest_fingerprint(manifest: "Manifest | dict[str, Any]") -> str:
+    """Stable hash of an app configuration, used to tie evaluation runs to the exact draft they tested."""
+    data = manifest.model_dump(mode="json") if isinstance(manifest, BaseModel) else manifest
+    return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()

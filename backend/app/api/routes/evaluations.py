@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ...db import get_session
-from ...fde import Manifest, manifest_from_qa_app
+from ...fde import Manifest, manifest_fingerprint, manifest_from_qa_app
 from ...fde.runtime import execute_manifest
 from ...models import (
     AppVersion,
@@ -175,6 +175,7 @@ async def _set_payload(session: AsyncSession, suite: EvaluationSuite, app: QAApp
             "simulated": latest_run.simulated,
             "results": latest_run.results,
             "created_at": latest_run.created_at,
+            "matches_draft": latest_run.manifest_hash is not None and latest_run.manifest_hash == manifest_fingerprint(Manifest.model_validate(app.draft_manifest) if app.draft_manifest else manifest_from_qa_app(app)),
         },
     }
     if include_cases:
@@ -456,7 +457,7 @@ async def run_evaluation_set(
         raise HTTPException(status_code=409, detail=f"还有 {len(pending)} 个 Case 待补评测标准")
 
     manifest = Manifest.model_validate(app.draft_manifest) if app.draft_manifest else manifest_from_qa_app(app)
-    run = EvaluationRun(suite_id=suite.id, status=RunStatus.RUNNING)
+    run = EvaluationRun(suite_id=suite.id, status=RunStatus.RUNNING, manifest_hash=manifest_fingerprint(manifest))
     results: list[dict[str, Any]] = []
     for case in suite.cases:
         reasons: list[str] = []
@@ -496,7 +497,7 @@ async def run_evaluation_set(
     session.add(run)
     session.add(AuditEvent(workspace_id=context.workspace_id, actor_id=context.user_id, action="evaluation_set.run", resource_type="evaluation_set", resource_id=suite.id, detail={"passed": run.passed_count, "failed": run.failed_count}))
     await session.commit()
-    return {"id": run.id, "status": run.status, "passed_count": run.passed_count, "failed_count": run.failed_count, "results": results, "simulated": run.simulated, "created_at": run.created_at}
+    return {"id": run.id, "status": run.status, "passed_count": run.passed_count, "failed_count": run.failed_count, "results": results, "simulated": run.simulated, "created_at": run.created_at, "matches_draft": True}
 
 
 @router.post("/{suite_id}/cases", status_code=201)

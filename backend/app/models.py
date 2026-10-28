@@ -428,6 +428,7 @@ class EvaluationRun(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
     suite_id: Mapped[str] = mapped_column(ForeignKey("evaluation_suites.id", ondelete="CASCADE"), nullable=False, index=True)
     app_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    manifest_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     status: Mapped[str] = mapped_column(String(24), default=RunStatus.RUNNING, nullable=False)
     passed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     failed_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
