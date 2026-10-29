@@ -81,8 +81,8 @@ async def _parse_pdf(data: bytes, ocr: CloudOcr) -> ParsedDocument:
             image_refs = list(reader.pages[index].images)
             if image_refs and not ocr.is_available:
                 raise OcrError(
-                    "PDF contains images that require cloud OCR. Select an enabled OCR model for this "
-                    "knowledge base; no local OCR model is used."
+                    "该 PDF 含扫描页或图片，需要 OCR 才能识别文字：请在知识库「配置」中选择"
+                    "「图片理解 / OCR」模型后重试"
                 )
             if image_refs and ocr.is_available:
                 for image_index, image in enumerate(image_refs):
@@ -179,8 +179,8 @@ async def _parse_word(data: bytes, ocr: CloudOcr) -> ParsedDocument:
     ]
     if image_relationships and not ocr.is_available:
         raise OcrError(
-            "Word document contains images that require cloud OCR. Select an enabled OCR model for this "
-            "knowledge base; no local OCR model is used."
+            "该 Word 文档含图片，需要 OCR 才能识别其中文字：请在知识库「配置」中选择"
+            "「图片理解 / OCR」模型后重试"
         )
     if ocr.is_available:
         for image_index, relationship in enumerate(image_relationships, start=1):

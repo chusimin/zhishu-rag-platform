@@ -88,7 +88,7 @@ async def test_word_with_image_requires_cloud_ocr() -> None:
     payload = io.BytesIO()
     document.save(payload)
 
-    with pytest.raises(OcrError, match="contains images that require cloud OCR"):
+    with pytest.raises(OcrError, match="需要 OCR"):
         await parse_bytes(payload.getvalue(), "with-image.docx")
 
     parsed = await parse_bytes(payload.getvalue(), "with-image.docx", ocr=StubCloudOcr())
@@ -124,7 +124,7 @@ async def test_parse_xlsx_extracts_sheet_as_markdown() -> None:
 
 
 async def test_image_without_cloud_ocr_configuration_fails_explicitly() -> None:
-    with pytest.raises(OcrError, match="requires cloud OCR"):
+    with pytest.raises(OcrError, match="需要 OCR"):
         await parse_bytes(b"not-a-real-image", "scan.png")
 
 

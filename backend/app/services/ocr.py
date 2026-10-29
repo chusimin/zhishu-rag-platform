@@ -44,7 +44,7 @@ class DisabledOcr(CloudOcr):
     async def extract_markdown(self, image: bytes, mime_type: str) -> str:
         del image, mime_type
         raise OcrError(
-            "This file requires cloud OCR. Select an enabled OCR model for this knowledge base; no local OCR model is used."
+            "该文件需要 OCR 才能识别文字：请在知识库「配置」中选择「图片理解 / OCR」模型后重试"
         )
 
 

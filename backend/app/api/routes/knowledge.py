@@ -35,7 +35,7 @@ from ...services.ingestion import process_import_job
 from ...services.chunking import normalize_chunk_config, split_document
 from ...services.chunk_enhancement import chunk_index_text
 from ...services.metadata_extraction import build_embedding_text, normalize_document_metadata
-from ...services.ocr import build_ocr, get_ocr
+from ...services.ocr import OcrError, build_ocr, get_ocr
 from ...services.parsers import SUPPORTED_EXTENSIONS, parse_bytes
 from ...providers import build_gateway
 from ...services.storage import ObjectStorage, get_storage
@@ -479,7 +479,8 @@ async def preview_chunks(
             heading_level=chunk_config["heading_level"],
             rows_per_chunk=chunk_config["rows_per_chunk"],
         )
-    except ValueError as exc:
+    except (ValueError, OcrError) as exc:
+        # 扫描件缺 OCR 模型等可预期的问题返回 422 和可操作的提示，而不是 500
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     preview = [{"ordinal": index, "title": str(item.metadata.get("title", f"分块 {index}")), "content": item.page_content, "char_count": len(item.page_content), "metadata": item.metadata} for index, item in enumerate(chunks[:100], start=1)]
     return {"filename": safe_name, "method": method, "total_chunks": len(chunks), "returned_chunks": len(preview), "page_count": parsed.page_count, "warnings": parsed.warnings, "chunks": preview}
