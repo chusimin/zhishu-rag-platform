@@ -1,7 +1,7 @@
-import { Bot, Pencil, Play, Plus, RefreshCw, Trash2, Wrench } from 'lucide-react';
+import { Bot, Pencil, Play, Plus, RefreshCw, Search, Trash2, Wrench } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
-import { apiFetch, errorMessage, formatDateTime, type ApiModelConfig, type ApiToolConfig } from '../api/client';
+import { apiFetch, errorMessage, formatDateTime, type ApiModelConfig, type ApiOpenRouterCatalog, type ApiOpenRouterCatalogModel, type ApiToolConfig } from '../api/client';
 import { ConfirmModal, Drawer, Empty, Field, Loading, Notice, Spinner, Switch, Tag, useToast } from '../components/ui';
 
 type Tab = 'models' | 'tools';
@@ -43,6 +43,7 @@ function ModelsView() {
   const [draft, setDraft] = useState<ModelDraft | null>(null);
   const [busy, setBusy] = useState('');
   const [removing, setRemoving] = useState<ApiModelConfig | null>(null);
+  const [connecting, setConnecting] = useState<{ provider?: CatalogProvider; sourceModelId?: string } | null>(null);
 
   const load = useCallback(() => apiFetch<ApiModelConfig[]>('/models').then((list) => { setItems(list); setError(''); }).catch((caught) => setError(errorMessage(caught))), []);
   useEffect(() => { void load(); }, [load]);
@@ -82,6 +83,11 @@ function ModelsView() {
     } catch (caught) { toast(errorMessage(caught), 'error'); } finally { setBusy(''); await load(); }
   };
 
+  // 每家已接入的服务商取一个模型作为凭据来源，追加模型时无需重新填写 API Key
+  const connected = Object.keys(CATALOG_PROVIDERS).flatMap((provider) => {
+    const source = items?.find((item) => item.provider === provider && item.api_key_masked);
+    return source ? [{ provider: provider as CatalogProvider, sourceModelId: source.id }] : [];
+  });
   const isNew = !draft?.id;
   const keyRequired = isNew && draft?.provider !== 'mock';
 
@@ -90,11 +96,18 @@ function ModelsView() {
       <div className="row" style={{ marginBottom: 12 }}>
         <p className="faint grow">知识库需要 Embedding 模型建索引，应用需要 LLM 对话。填写单价后，可观测会估算费用。</p>
         <button className="btn" onClick={() => void load()}><RefreshCw size={14} />刷新</button>
-        <button className="btn primary" onClick={() => setDraft({ ...emptyModel })}><Plus size={15} />接入模型</button>
+        <button className="btn" onClick={() => setDraft({ ...emptyModel })}>手动添加</button>
+        <button className="btn primary" onClick={() => setConnecting({})}><Plus size={15} />接入模型服务商</button>
       </div>
+      {connected.length ? (
+        <div className="row wrap" style={{ marginBottom: 12, gap: 8 }}>
+          <span className="faint">已接入：</span>
+          {connected.map((item) => <button key={item.provider} className="btn sm" onClick={() => setConnecting({ provider: item.provider, sourceModelId: item.sourceModelId })}><Plus size={13} />从 {CATALOG_PROVIDERS[item.provider].name} 添加更多模型</button>)}
+        </div>
+      ) : null}
       {error ? <Notice tone="error">{error}</Notice> : null}
       {!items && !error ? <Loading /> : null}
-      {items && !items.length ? <Empty icon={<Bot size={26} />} title="还没有接入模型" desc="先接入一个 LLM 和一个 Embedding 模型，就能创建知识库和应用。" action={<button className="btn primary" onClick={() => setDraft({ ...emptyModel })}><Plus size={15} />接入模型</button>} /> : null}
+      {items && !items.length ? <Empty icon={<Bot size={26} />} title="还没有接入模型" desc="先接入一个 LLM 和一个 Embedding 模型，就能创建知识库和应用。" action={<button className="btn primary" onClick={() => setConnecting({})}><Plus size={15} />接入模型服务商</button>} /> : null}
       {items?.length ? (
         <table className="table">
           <thead><tr><th>名称</th><th>类型</th><th>供应商 · 模型</th><th>单价（每百万 tokens）</th><th>状态</th><th>启用</th><th style={{ width: 170 }} /></tr></thead>
@@ -144,9 +157,118 @@ function ModelsView() {
           <div className="row"><span className="grow">启用</span><Switch on={draft.is_enabled} label="启用" onChange={(value) => setDraft({ ...draft, is_enabled: value })} /></div>
         </> : null}
       </Drawer>
+      <ProviderConnect value={connecting} existing={items ?? []} onClose={() => setConnecting(null)} onDone={() => { setConnecting(null); void load(); }} />
       <ConfirmModal open={!!removing} danger title="删除模型" confirmText="删除" body={<>删除「{removing?.display_name}」后，使用它的知识库和应用需要改选其他模型。</>} onClose={() => setRemoving(null)}
         onConfirm={async () => { if (!removing) return; try { await apiFetch(`/models/${removing.id}`, { method: 'DELETE' }); toast('已删除'); await load(); } catch (caught) { toast(errorMessage(caught), 'error'); } }} />
     </>
+  );
+}
+
+/* ------------------------------ 接入模型服务商 ------------------------------ */
+
+type CatalogProvider = 'openrouter' | 'aihubmix' | 'deepseek';
+const CATALOG_PROVIDERS: Record<CatalogProvider, { name: string; desc: string; keyUrl: string }> = {
+  openrouter: { name: 'OpenRouter', desc: '聚合数百个主流模型，一个 Key 全部可用', keyUrl: 'https://openrouter.ai/keys' },
+  aihubmix: { name: 'AIHubMix', desc: '国内可直连的多模型聚合，含 Embedding / Rerank', keyUrl: 'https://aihubmix.com' },
+  deepseek: { name: 'DeepSeek', desc: 'DeepSeek 官方 API', keyUrl: 'https://platform.deepseek.com/api_keys' },
+};
+const TYPE_TABS: Array<[ApiModelConfig['model_type'] | 'all', string]> = [['all', '全部'], ['llm', '对话'], ['embedding', '索引'], ['rerank', '重排'], ['ocr', '图片理解']];
+const catalogKey = (model: Pick<ApiOpenRouterCatalogModel, 'model_type' | 'id'>) => `${model.model_type}:${model.id}`;
+
+/** 先选服务商、填一次 Key，再从读取到的模型目录里勾选要接入的模型。 */
+function ProviderConnect({ value, existing, onClose, onDone }: { value: { provider?: CatalogProvider; sourceModelId?: string } | null; existing: ApiModelConfig[]; onClose: () => void; onDone: () => void }) {
+  const toast = useToast();
+  const [provider, setProvider] = useState<CatalogProvider>('openrouter');
+  const [apiKey, setApiKey] = useState('');
+  const [baseUrl, setBaseUrl] = useState('');
+  const [catalog, setCatalog] = useState<ApiOpenRouterCatalog | null>(null);
+  const [selected, setSelected] = useState<string[]>([]);
+  const [type, setType] = useState<(typeof TYPE_TABS)[number][0]>('all');
+  const [q, setQ] = useState('');
+  const [freeOnly, setFreeOnly] = useState(false);
+  const [busy, setBusy] = useState('');
+
+  const credentials = (): Record<string, string> => (value?.sourceModelId ? { source_model_id: value.sourceModelId } : { api_key: apiKey.trim(), ...(baseUrl.trim() ? { base_url: baseUrl.trim() } : {}) });
+  const loadCatalog = useCallback(async (target: CatalogProvider, creds: Record<string, string>) => {
+    setBusy('catalog');
+    setCatalog(null);
+    try {
+      setCatalog(await apiFetch<ApiOpenRouterCatalog>(`/models/providers/${target}/catalog`, { method: 'POST', body: JSON.stringify(creds) }));
+    } catch (caught) { toast(errorMessage(caught), 'error'); } finally { setBusy(''); }
+  }, [toast]);
+
+  useEffect(() => {
+    if (!value) return;
+    setProvider(value.provider ?? 'openrouter'); setApiKey(''); setBaseUrl(''); setCatalog(null); setSelected([]); setType('all'); setQ(''); setFreeOnly(false);
+    // 已接入的服务商直接用已保存的 Key 读取目录
+    if (value.provider && value.sourceModelId) void loadCatalog(value.provider, { source_model_id: value.sourceModelId });
+  }, [value, loadCatalog]);
+
+  const already = new Set(existing.filter((item) => item.provider === provider).map((item) => `${item.model_type}:${item.model_name}`));
+  const counts = Object.fromEntries(TYPE_TABS.map(([key]) => [key, catalog?.models.filter((model) => key === 'all' || model.model_type === key).length ?? 0]));
+  const visible = (catalog?.models ?? []).filter((model) => (type === 'all' || model.model_type === type)
+    && (!freeOnly || model.is_free)
+    && (!q || `${model.id} ${model.name}`.toLowerCase().includes(q.toLowerCase())));
+
+  const save = async () => {
+    if (!catalog) return;
+    setBusy('import');
+    try {
+      const models = catalog.models.filter((model) => selected.includes(catalogKey(model))).map((model) => ({ model_name: model.id, display_name: model.name.slice(0, 120), model_type: model.model_type }));
+      const saved = await apiFetch<ApiModelConfig[]>(`/models/providers/${provider}/import`, { method: 'POST', body: JSON.stringify({ ...credentials(), models }) });
+      toast(`已接入 ${saved.length} 个模型，可在列表中测试连接`);
+      onDone();
+    } catch (caught) { toast(errorMessage(caught), 'error'); } finally { setBusy(''); }
+  };
+
+  const fixed = !!value?.sourceModelId;
+  return (
+    <Drawer open={!!value} wide title={fixed ? `从 ${CATALOG_PROVIDERS[provider].name} 添加模型` : '接入模型服务商'} onClose={onClose}
+      footer={<><span className="faint grow">已选 {selected.length} 个</span><button className="btn" onClick={onClose}>取消</button><button className="btn primary" disabled={!selected.length || busy === 'import'} onClick={() => void save()}>{busy === 'import' ? <Spinner /> : null}接入选中的模型</button></>}>
+      {!fixed ? <>
+        <div className="field-label">1. 选择服务商</div>
+        <div className="grid c3" style={{ gap: 10, marginBottom: 14 }}>
+          {(Object.keys(CATALOG_PROVIDERS) as CatalogProvider[]).map((key) => (
+            <button key={key} type="button" className={`method-card ${provider === key ? 'active' : ''}`} style={{ flexDirection: 'column', alignItems: 'flex-start' }} onClick={() => { setProvider(key); setCatalog(null); setSelected([]); }}>
+              <h4>{CATALOG_PROVIDERS[key].name}{existing.some((item) => item.provider === key) ? <Tag tone="green">已接入</Tag> : null}</h4><p>{CATALOG_PROVIDERS[key].desc}</p>
+            </button>
+          ))}
+        </div>
+        <div className="field-label">2. 填写 API Key<a className="hint" href={CATALOG_PROVIDERS[provider].keyUrl} target="_blank" rel="noreferrer">去获取 Key</a></div>
+        <div className="row" style={{ marginBottom: 8 }}>
+          <input className="input mono" type="password" autoComplete="off" placeholder={`${CATALOG_PROVIDERS[provider].name} API Key`} value={apiKey} onChange={(event) => setApiKey(event.target.value)} />
+          <button className="btn primary" disabled={!apiKey.trim() || busy === 'catalog'} onClick={() => void loadCatalog(provider, credentials())}>{busy === 'catalog' ? <Spinner /> : null}读取模型列表</button>
+        </div>
+        <details style={{ marginBottom: 14 }}><summary className="faint" style={{ cursor: 'pointer' }}>自定义 Base URL（使用代理或私有网关时填写）</summary><input className="input mono" style={{ marginTop: 6 }} placeholder="留空使用官方地址" value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} /></details>
+        <div className="field-label">3. 选择要接入的模型</div>
+      </> : null}
+      {busy === 'catalog' ? <Loading text="正在读取模型目录" /> : !catalog ? <p className="faint">{fixed ? '' : '填写 Key 并读取后，这里会列出该服务商的全部模型。'}</p> : <>
+        <Notice tone="success">{catalog.detail}（{catalog.latency_ms}ms）</Notice>
+        <div className="row wrap" style={{ margin: '12px 0', gap: 8 }}>
+          <div className="seg">{TYPE_TABS.map(([key, label]) => <button key={key} className={type === key ? 'active' : ''} disabled={key !== 'all' && !counts[key]} onClick={() => setType(key)}>{label} {counts[key]}</button>)}</div>
+          <label className="row faint" style={{ fontSize: 13 }}><input type="checkbox" checked={freeOnly} onChange={(event) => setFreeOnly(event.target.checked)} />只看免费</label>
+          <span className="grow" />
+          <div className="search-box" style={{ width: 220 }}><Search size={14} /><input className="input sm" placeholder="搜索模型" aria-label="搜索模型" value={q} onChange={(event) => setQ(event.target.value)} /></div>
+        </div>
+        <div className="col" style={{ gap: 6 }}>
+          {visible.slice(0, 300).map((model) => {
+            const key = catalogKey(model);
+            const has = already.has(`${model.model_type}:${model.id}`);
+            return (
+              <label key={key} className="row" style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px', opacity: has ? 0.6 : 1 }}>
+                <input type="checkbox" disabled={has} checked={selected.includes(key)} onChange={(event) => setSelected(event.target.checked ? [...selected, key] : selected.filter((item) => item !== key))} />
+                <div className="grow" style={{ minWidth: 0 }}>
+                  <div className="row" style={{ gap: 6 }}><strong style={{ fontSize: 13 }} className="ellipsis">{model.name}</strong><Tag>{MODEL_TYPES[model.model_type].split(' ')[0]}</Tag>{model.is_free ? <Tag tone="green">免费</Tag> : null}{has ? <Tag tone="blue">已接入</Tag> : null}</div>
+                  <div className="faint mono ellipsis">{model.id}{model.context_length ? ` · ${Math.round(model.context_length / 1000)}K 上下文` : ''}{model.prompt_price ? ` · 输入 ${model.prompt_price}` : ''}</div>
+                </div>
+              </label>
+            );
+          })}
+          {visible.length > 300 ? <p className="faint">仅显示前 300 个，请用搜索缩小范围。</p> : null}
+          {!visible.length ? <p className="faint">没有符合条件的模型。</p> : null}
+        </div>
+      </>}
+    </Drawer>
   );
 }
 
