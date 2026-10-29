@@ -275,13 +275,22 @@ async def process_import_job(
                 if enhancement_model is None or not enhancement_model.is_enabled or enhancement_model.model_type != "llm":
                     raise ValueError("Configured text understanding LLM is missing, disabled, or invalid")
                 enhancement_gateway = build_gateway(enhancement_model)
-            await enhance_chunks(
+            generated_pairs, failed_batches = await enhance_chunks(
                 documents,
                 qa=chunk_config["enhance_qa"],
                 keywords=chunk_config["enhance_keywords"],
                 qa_count=chunk_config["qa_per_chunk"],
                 gateway=enhancement_gateway,
             )
+            summary = [f"{len(documents)} 个分块"]
+            if chunk_config["enhance_qa"]:
+                summary.append(f"生成 {generated_pairs} 组问答对")
+            if failed_batches:
+                summary.append(f"{failed_batches} 批模型输出无法解析，已跳过问答对、关键词改用规则抽取")
+            job.stage_details = [
+                *(item for item in job.stage_details if item.get("name") != "chunk_enhancement"),
+                _stage("chunk_enhancement", "warning" if failed_batches else "success", "；".join(summary)),
+            ]
 
         if not knowledge_base.embedding_model_id:
             raise ValueError("Knowledge base has no embedding model configured")

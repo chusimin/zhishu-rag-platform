@@ -79,3 +79,18 @@ async def test_keywords_fall_back_to_rules_and_qa_requires_llm(client: AsyncClie
 def test_rule_keywords_prefers_repeated_terms() -> None:
     words = rule_keywords("保修一年。保修范围不含人为损坏。E07 故障，E07 代码。")
     assert "保修" in words and "E07" in words
+
+
+async def test_unparseable_model_output_does_not_fail_the_import(client: AsyncClient) -> None:
+    created = await client.post(
+        "/api/v1/models", headers=ADMIN_HEADERS,
+        json={"display_name": "胡言乱语", "provider": "mock", "model_type": "llm", "model_name": "garbage", "config": {"response_text": "抱歉，我无法输出 JSON"}},
+    )
+    kb_id = await _knowledge_base(client, created.json()["id"])
+    body = await _upload(client, kb_id, {"enhance_qa": True, "enhance_keywords": True})
+    assert body["file"]["status"] == "completed", body
+    stage = next(item for item in body["job"]["stage_details"] if item["name"] == "chunk_enhancement")
+    assert stage["status"] == "warning" and "无法解析" in stage["detail"]
+    chunk = (await client.get(f"/api/v1/knowledge-bases/{kb_id}/chunks", headers=MANAGER_HEADERS)).json()[0]
+    assert chunk["metadata_json"]["qa_pairs"] == []
+    assert chunk["metadata_json"]["keywords"]  # rule fallback

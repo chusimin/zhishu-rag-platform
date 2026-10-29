@@ -118,19 +118,27 @@ async def enhance_chunks(
     keywords: bool,
     qa_count: int = 3,
     gateway: ModelGateway | None = None,
-) -> int:
-    """原地为分块补充 metadata["keywords"] / metadata["qa_pairs"]，返回生成的问答对数量。"""
+) -> tuple[int, int]:
+    """原地为分块补充 metadata["keywords"] / metadata["qa_pairs"]。
+
+    返回 (生成的问答对数量, 模型输出无法使用的批次数)。单批失败不影响整个导入：
+    该批关键词退回规则抽取、问答对留空。
+    """
     if not (qa or keywords):
-        return 0
+        return 0, 0
     if qa and gateway is None:
         raise ValueError("问答对生成需要先在知识库配置中设置文本理解模型")
     qa_count = max(1, min(qa_count, MAX_QA))
     generated = 0
+    failed_batches = 0
     for start in range(0, len(documents), BATCH_SIZE):
         batch = documents[start : start + BATCH_SIZE]
         results: list[dict[str, Any]] = [{} for _ in batch]
         if gateway is not None:
-            results = await _llm_batch(gateway, [item.page_content for item in batch], qa=qa, keywords=keywords, qa_count=qa_count)
+            try:
+                results = await _llm_batch(gateway, [item.page_content for item in batch], qa=qa, keywords=keywords, qa_count=qa_count)
+            except (ValueError, json.JSONDecodeError):
+                failed_batches += 1
         for document, result in zip(batch, results, strict=True):
             if keywords:
                 document.metadata["keywords"] = _clean_keywords(result.get("keywords")) or rule_keywords(document.page_content)
@@ -138,7 +146,7 @@ async def enhance_chunks(
                 pairs = _clean_qa(result.get("qa"), qa_count)
                 document.metadata["qa_pairs"] = pairs
                 generated += len(pairs)
-    return generated
+    return generated, failed_batches
 
 
 def chunk_index_text(content: str, metadata: dict[str, Any] | None) -> str:

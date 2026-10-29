@@ -446,9 +446,10 @@ function BuildsView() {
               {open.stage_details.map((stage, index) => {
                 const ok = stage.status === 'success';
                 const active = stage.status === 'active';
+                const warning = stage.status === 'warning';
                 return (
                   <div key={index} className="span-row">
-                    <span className="span-dot" style={{ background: ok ? '#12b76a' : active ? '#3370ff' : '#f04438' }}>{ok ? <CheckCircle2 size={12} /> : active ? <Spinner size={12} /> : <XCircle size={12} />}</span>
+                    <span className="span-dot" style={{ background: ok ? '#12b76a' : active ? '#3370ff' : warning ? '#f79009' : '#f04438' }}>{ok ? <CheckCircle2 size={12} /> : active ? <Spinner size={12} /> : warning ? <AlertTriangle size={12} /> : <XCircle size={12} />}</span>
                     <div><strong style={{ fontSize: 13 }}>{STAGE_LABEL[stage.name] ?? stage.name}</strong><div className="faint" style={{ whiteSpace: 'pre-wrap' }}>{stage.detail}</div></div>
                     <span />
                   </div>
