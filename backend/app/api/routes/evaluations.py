@@ -12,9 +12,12 @@ from sqlalchemy.orm import selectinload
 from ...db import get_session
 from ...fde import Manifest, manifest_fingerprint, manifest_from_qa_app
 from ...fde.runtime import execute_manifest
+from ...providers import build_gateway
+from ...services.eval_design import DESIGN_RULES, MAX_CASES, default_rule_keys, design_cases
 from ...models import (
     AppVersion,
     AuditEvent,
+    DocumentChunk,
     EvaluationCase,
     EvaluationRun,
     EvaluationSuite,
@@ -34,6 +37,15 @@ class EvaluationSetCreate(BaseModel):
     app_id: str
     name: str = Field(min_length=1, max_length=180)
     description: str = Field(default="", max_length=4000)
+
+
+class EvaluationDesignRequest(BaseModel):
+    app_id: str
+    name: str | None = Field(default=None, max_length=180)
+    target_set_id: str | None = None
+    rule_keys: list[str] = Field(default_factory=list, max_length=20)
+    directions: str = Field(default="", max_length=4000)
+    count: int = Field(default=10, ge=1, le=MAX_CASES)
 
 
 class EvaluationSetUpdate(BaseModel):
@@ -61,7 +73,7 @@ class CasesFromLogsRequest(BaseModel):
 
 class EvaluationCaseUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=180)
-    case_type: Literal["good", "bad", "manual"] | None = None
+    case_type: Literal["good", "bad", "manual", "ai"] | None = None
     message: str | None = Field(default=None, max_length=12000)
     expected_output: str | None = Field(default=None, max_length=30000)
     expected_keywords: list[str] | None = Field(default=None, max_length=20)
@@ -328,6 +340,72 @@ async def create_evaluation_set(
     session.add(suite)
     await session.flush()
     session.add(AuditEvent(workspace_id=context.workspace_id, actor_id=context.user_id, action="evaluation_set.created", resource_type="evaluation_set", resource_id=suite.id, detail={"app_id": app.id}))
+    await session.commit()
+    return await _set_payload(session, suite, app, include_cases=True)
+
+
+@router.get("/design-rules")
+async def evaluation_design_rules(
+    app_id: str,
+    context: AuthContext = Depends(require_roles("admin", "manager")),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """评测规则目录，以及按应用场景、是否关联知识库推荐的默认勾选。"""
+    app = await _app(session, app_id, context.workspace_id)
+    manifest = _draft_manifest(app)
+    return {
+        "rules": [{key: rule[key] for key in ("key", "name", "description")} | {"needs_knowledge": bool(rule.get("needs_knowledge"))} for rule in DESIGN_RULES],
+        "recommended": default_rule_keys(manifest.template_key, bool(manifest.knowledge_base_ids)),
+        "has_knowledge": bool(manifest.knowledge_base_ids),
+        "has_model": bool(manifest.llm_model_id),
+    }
+
+
+@router.post("/ai-design", status_code=201)
+async def ai_design_evaluation_set(
+    payload: EvaluationDesignRequest,
+    context: AuthContext = Depends(require_roles("admin", "manager")),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """用应用当前选择的对话模型，按规则与业务方向生成可直接运行的评测 Case。"""
+    app = await _app(session, payload.app_id, context.workspace_id)
+    manifest = _draft_manifest(app)
+    if not manifest.llm_model_id:
+        raise HTTPException(status_code=422, detail="应用还没有选择对话模型，请先在编排中选择，评测设计会使用该模型")
+    model = await session.get(ModelConfig, manifest.llm_model_id)
+    if model is None or not model.is_enabled:
+        raise HTTPException(status_code=422, detail="应用的对话模型不存在或已停用")
+    samples: list[str] = []
+    if manifest.knowledge_base_ids:
+        rows = await session.scalars(
+            select(DocumentChunk.content).where(DocumentChunk.knowledge_base_id.in_(manifest.knowledge_base_ids)).order_by(func.random()).limit(8)
+        )
+        samples = [item for item in rows if item and item.strip()]
+    try:
+        cases = await design_cases(
+            build_gateway(model), manifest, rule_keys=payload.rule_keys, directions=payload.directions, count=payload.count, knowledge_samples=samples,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    if payload.target_set_id:
+        suite, _ = await _suite(session, payload.target_set_id, context.workspace_id)
+        if suite.app_id != app.id:
+            raise HTTPException(status_code=422, detail="目标评测集不属于该应用")
+    else:
+        suite = EvaluationSuite(
+            app_id=app.id, name=(payload.name or f"{app.name} · AI 设计评测集").strip()[:180],
+            description=f"AI 按规则生成：{'、'.join(rule['name'] for rule in DESIGN_RULES if rule['key'] in payload.rule_keys) or '自定义方向'}"
+            + (f"；业务方向：{payload.directions.strip()[:200]}" if payload.directions.strip() else ""),
+            created_by=context.user_id, is_release_gate=False,
+        )
+        session.add(suite)
+        await session.flush()
+    for item in cases:
+        case = EvaluationCase(suite_id=suite.id, case_type="ai", created_by=context.user_id, source_snapshot={"captured_from": "ai_design", "model": model.model_name}, expected_output="", **item)
+        case.readiness = _case_readiness(case)
+        session.add(case)
+    session.add(AuditEvent(workspace_id=context.workspace_id, actor_id=context.user_id, action="evaluation_set.ai_designed", resource_type="evaluation_set", resource_id=suite.id, detail={"count": len(cases), "rules": payload.rule_keys}))
     await session.commit()
     return await _set_payload(session, suite, app, include_cases=True)
 
