@@ -4,7 +4,7 @@ import { Link } from 'react-router-dom';
 import { ApiError, errorMessage } from '../api/client';
 import { fdeApi, type AppManifest, type Citation, type RunResult } from '../api/fde';
 import { Markdown } from './Markdown';
-import { AppTile, Drawer, Field, Spinner, Tag, formatDuration, useToast } from './ui';
+import { AppTile, Drawer, Field, Notice, Spinner, Tag, formatDuration, useToast } from './ui';
 
 type Step = RunResult['agent_steps'][number];
 
@@ -159,6 +159,10 @@ export function ChatPanel({ appId, manifest, mode, shareToken, title, initialCon
 
   const send = (text: string) => {
     if (busy) return;
+    if (!manifest.llm_model_id) {
+      toast(debug ? '请先在左侧「模型与提示词」中选择对话模型' : '应用还没有配置对话模型，请联系管理员', 'error');
+      return;
+    }
     const message = text.trim();
     if (!message && !form) return;
     const inputs = inputsForMessage(manifest, message, values);
@@ -250,6 +254,7 @@ export function ChatPanel({ appId, manifest, mode, shareToken, title, initialCon
           {formOpen ? <div style={{ maxHeight: 280, overflow: 'auto', paddingTop: 8 }}><InputForm manifest={manifest} values={values} onChange={setValues} /></div> : null}
         </div>
       ) : null}
+      {debug && !manifest.llm_model_id ? <div style={{ margin: '0 20px 8px' }}><Notice tone="warn">还没有选择对话模型，选择后才能调试。</Notice></div> : null}
       <form className="composer" onSubmit={(event) => { event.preventDefault(); send(input); }}>
         <textarea rows={1} aria-label="输入消息" value={input} placeholder={debug ? '输入问题调试当前草稿（不影响线上）' : form ? '可补充说明，或直接发送表单' : '输入你的问题，Enter 发送，Shift+Enter 换行'} onChange={(event) => setInput(event.target.value)}
           onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) { event.preventDefault(); send(input); } }} />

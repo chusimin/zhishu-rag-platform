@@ -92,7 +92,7 @@ export function Modal({ open, title, onClose, children, footer, wide, icon }: Pr
   useEffect(() => { if (open) ref.current?.focus(); }, [open]);
   if (!open) return null;
   return (
-    <div className="overlay" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+    <div className="overlay modal-layer" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}>
       <div className={`modal ${wide ? 'wide' : ''}`} role="dialog" aria-modal="true" aria-label={title} tabIndex={-1} ref={ref}>
         <div className="modal-head">{icon}<h3>{title}</h3><button className="btn ghost sm icon" aria-label="关闭" onClick={onClose}><X size={16} /></button></div>
         <div className="modal-body">{children}</div>

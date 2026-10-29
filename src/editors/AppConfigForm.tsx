@@ -1,5 +1,5 @@
 import { Bot, BookOpen, ChevronDown, Database, FormInput, Headset, MessageSquareText, Plus, Settings2, Shield, Trash2, Wrench, X } from 'lucide-react';
-import { useState, type PropsWithChildren, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type PropsWithChildren, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import type { ApiKnowledgeBase, ApiModelOption, ApiToolConfig } from '../api/client';
 import type { AppManifest, AppTemplate, InputField } from '../api/fde';
@@ -87,6 +87,58 @@ function FieldEditor({ fields, onChange }: { fields: InputField[]; onChange: (fi
   );
 }
 
+/** 系统提示词：点「插入变量」或输入 {{ 时弹出表单字段，选中后插入到光标处。 */
+function PromptEditor({ value, fields, onChange, variables = true }: { value: string; fields: InputField[]; onChange: (value: string) => void; variables?: boolean }) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  const [menu, setMenu] = useState<{ query: string; typed: boolean } | null>(null);
+  const caret = useRef<number | null>(null);
+  useEffect(() => {
+    if (caret.current == null || !ref.current) return;
+    ref.current.focus();
+    ref.current.setSelectionRange(caret.current, caret.current);
+    caret.current = null;
+  }, [value]);
+
+  const insert = (key: string) => {
+    const el = ref.current;
+    const end = el ? el.selectionEnd : value.length;
+    // 通过输入 {{ 触发时，替换掉已经敲出的 {{ 和部分变量名
+    const start = menu?.typed ? value.lastIndexOf('{{', end) : el ? el.selectionStart : value.length;
+    const token = `{{${key}}}`;
+    caret.current = start + token.length;
+    onChange(value.slice(0, start) + token + value.slice(end));
+    setMenu(null);
+  };
+  const detect = (text: string, position: number) => {
+    const match = /\{\{([a-z0-9_]*)$/.exec(text.slice(0, position));
+    setMenu(match && fields.length ? { query: match[1], typed: true } : null);
+  };
+  const options = fields.filter((field) => !menu?.query || field.key.includes(menu.query) || field.label.includes(menu.query));
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <textarea ref={ref} className="textarea" style={{ minHeight: 220, fontSize: 13 }} value={value}
+        onChange={(event) => { onChange(event.target.value); detect(event.target.value, event.target.selectionStart); }}
+        onKeyDown={(event) => { if (event.key === 'Escape' && menu) { event.preventDefault(); setMenu(null); } if (event.key === 'Enter' && menu && options.length) { event.preventDefault(); insert(options[0].key); } }}
+        onBlur={() => window.setTimeout(() => setMenu(null), 150)} />
+      {variables ? <div className="row wrap" style={{ marginTop: 6, gap: 4 }}>
+        <button type="button" className="btn sm" disabled={!fields.length} title={fields.length ? undefined : '先在「表单输入」中添加字段'} onClick={() => setMenu(menu ? null : { query: '', typed: false })}><Plus size={13} />插入变量</button>
+        {fields.map((field) => <button type="button" key={field.key} className="tag mono" style={{ cursor: 'pointer' }} title={`插入 ${field.label}`} onMouseDown={(event) => event.preventDefault()} onClick={() => insert(field.key)}>{`{{${field.key}}}`}</button>)}
+        {!fields.length ? <span className="faint">在下方「表单输入」添加字段后可在此引用</span> : null}
+      </div> : null}
+      {menu && options.length ? (
+        <div className="card" role="listbox" style={{ position: 'absolute', left: 0, top: menu.typed ? 'calc(100% - 34px)' : '100%', zIndex: 20, minWidth: 240, padding: 4, boxShadow: 'var(--shadow-lg)' }}>
+          {options.map((field) => (
+            <button type="button" key={field.key} role="option" aria-selected={false} className="sub-link" onMouseDown={(event) => event.preventDefault()} onClick={() => insert(field.key)}>
+              <span className="mono">{`{{${field.key}}}`}</span><span className="faint">{field.label}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 export function AppConfigForm({ manifest, patch, templates, models, knowledge, tools }: {
   manifest: AppManifest;
   patch: Patch;
@@ -105,10 +157,6 @@ export function AppConfigForm({ manifest, patch, templates, models, knowledge, t
   const template = templates.find((item) => item.key === manifest.template_key);
   const kbById = new Map(knowledge.map((item) => [item.id, item]));
 
-  const setType = (type: AppManifest['type']) => {
-    if (type === 'simple') patch({ type, tools: manifest.tools.filter((tool) => !tool.tool_id) });
-    else patch({ type, memory: { ...manifest.memory, enabled: true } });
-  };
   const toggleTool = (tool: ApiToolConfig) => {
     const exists = externalTools.some((item) => item.tool_id === tool.id);
     patch({ tools: exists ? manifest.tools.filter((item) => item.tool_id !== tool.id) : [...manifest.tools, { name: toolRefName(tool), tool_id: tool.id, enabled: true, config: {} }] });
@@ -122,11 +170,8 @@ export function AppConfigForm({ manifest, patch, templates, models, knowledge, t
           <Field label="业务场景"><select className="select" value={manifest.template_key} onChange={(event) => patch({ template_key: event.target.value })}>{templates.map((item) => <option key={item.key} value={item.key}>{SCENES[item.key]?.name ?? item.name}</option>)}</select></Field>
         </div>
         <Field label="说明" hint="展示在工作台"><textarea className="textarea" style={{ minHeight: 56 }} value={manifest.description} onChange={(event) => patch({ description: event.target.value })} /></Field>
-        <Field label="应用类型">
-          <div className="seg">
-            {(['simple', 'agent'] as const).map((key) => <button type="button" key={key} className={manifest.type === key ? 'active' : ''} onClick={() => setType(key)}>{TYPE_META[key].name}</button>)}
-          </div>
-          <p className="faint" style={{ marginTop: 6 }}>{TYPE_META[manifest.type].desc}</p>
+        <Field label="应用类型" hint="创建时确定，不可更改">
+          <div className="row" style={{ gap: 8 }}><Tag tone={TYPE_META[manifest.type].tone}>{TYPE_META[manifest.type].name}</Tag><span className="faint">{TYPE_META[manifest.type].desc}</span></div>
         </Field>
       </Section>
 
@@ -142,8 +187,7 @@ export function AppConfigForm({ manifest, patch, templates, models, knowledge, t
           <Field label="回复上限" hint="tokens"><Slider label="回复上限" value={manifest.model.max_tokens} min={256} max={16384} step={256} onChange={(value) => patch({ model: { ...manifest.model, max_tokens: value } })} /></Field>
         </div>
         <Field label={isAgent ? '角色与工作方式' : '系统提示词'} hint={isAgent ? '写清楚何时检索、何时用哪个工具、何时转人工' : '可引用表单变量'}>
-          <textarea className="textarea" style={{ minHeight: 220, fontSize: 13 }} value={manifest.system_prompt} onChange={(event) => patch({ system_prompt: event.target.value })} />
-          {manifest.input_fields.length ? <div className="row wrap" style={{ marginTop: 6, gap: 4 }}>{manifest.input_fields.map((field) => <span key={field.key} className="tag mono">{`{{${field.key}}}`}</span>)}</div> : null}
+          <PromptEditor value={manifest.system_prompt} fields={manifest.input_fields} variables={!isAgent} onChange={(system_prompt) => patch({ system_prompt })} />
         </Field>
       </Section>
 

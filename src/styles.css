@@ -213,6 +213,8 @@ code, .mono { font-family: 'SF Mono', Menlo, Consolas, monospace; font-size: 12p
 
 /* ---------- Overlay ---------- */
 .overlay { position: fixed; inset: 0; background: rgba(16, 24, 40, 0.32); z-index: 50; display: grid; place-items: center; animation: fade 0.15s; }
+/* 弹窗常从抽屉里打开（回流 Case、删除确认），必须叠在抽屉之上 */
+.overlay.modal-layer { z-index: 60; }
 .modal { width: min(720px, calc(100vw - 48px)); max-height: calc(100vh - 64px); background: var(--surface); border-radius: 14px; box-shadow: var(--shadow-lg); display: flex; flex-direction: column; animation: pop 0.18s; }
 .modal.wide { width: min(980px, calc(100vw - 48px)); }
 .modal-head { padding: 18px 20px 12px; display: flex; align-items: center; gap: 10px; }

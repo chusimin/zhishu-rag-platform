@@ -424,7 +424,7 @@ async def execute_manifest(
     if not query:
         raise ValueError("message or input values are required")
     if not manifest.llm_model_id:
-        raise ValueError("Manifest has no LLM model configured")
+        raise ValueError("应用还没有选择对话模型，请在「模型与提示词」中选择后再运行")
     model = await session.get(ModelConfig, manifest.llm_model_id)
     if (
         model is None
