@@ -10,6 +10,7 @@ import { ChunkConfigFields, MethodPicker } from '../components/ChunkConfigFields
 import {
   ConfirmModal, Drawer, Empty, Field, Loading, Modal, Notice, Slider, Spinner, Tag, formatBytes, formatTime, useToast,
 } from '../components/ui';
+import { withRetrievalConfig } from '../lib/apps';
 import { ACTIVE_STATUSES, configProblem, defaultChunkConfig, FILE_STATUS, METHOD_LABEL, modelsOf, recommendedMethod, STAGE_LABEL } from '../lib/knowledge';
 
 function FileIcon({ file }: { file: Pick<ApiKnowledgeFile, 'extension' | 'filename'> }) {
@@ -54,7 +55,7 @@ export function KnowledgeDetailPage() {
         <Routes>
           <Route index element={<FilesView kb={kb} onChanged={reload} />} />
           <Route path="files/:fileId" element={<ChunksView kb={kb} />} />
-          <Route path="search" element={<SearchView kb={kb} />} />
+          <Route path="search" element={<SearchView kb={kb} usedBy={usedBy} />} />
           <Route path="settings" element={<SettingsView kb={kb} onSaved={setKb} usedBy={usedBy} />} />
         </Routes>
       </section>
@@ -318,7 +319,7 @@ function ChunksView({ kb }: { kb: ApiKnowledgeBase }) {
 
 type Mode = 'semantic' | 'fulltext' | 'hybrid';
 
-function SearchView({ kb }: { kb: ApiKnowledgeBase }) {
+function SearchView({ kb, usedBy }: { kb: ApiKnowledgeBase; usedBy: FDEApp[] }) {
   const toast = useToast();
   const [query, setQuery] = useState('');
   const [mode, setMode] = useState<Mode>(kb.embedding_model_id ? 'hybrid' : 'fulltext');
@@ -328,6 +329,26 @@ function SearchView({ kb }: { kb: ApiKnowledgeBase }) {
   const [result, setResult] = useState<ApiRetrievalResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [history, setHistory] = useState<string[]>([]);
+  const [applying, setApplying] = useState(false);
+  const [targets, setTargets] = useState<string[]>([]);
+  const [applyBusy, setApplyBusy] = useState(false);
+
+  // 把当前测试参数写入应用草稿的「检索参数」，线上版本需重新发布才生效
+  const applyToApps = async () => {
+    setApplyBusy(true);
+    try {
+      for (const id of targets) {
+        const app = await fdeApi.get(id);
+        await fdeApi.save(id, withRetrievalConfig(app.manifest, { mode, top_k: topK, rerank_top_n: Math.min(rerankN, topK), score_threshold: threshold }));
+      }
+      toast(`已写入 ${targets.length} 个应用的草稿，发布后线上生效`);
+      setApplying(false);
+    } catch (caught) {
+      toast(errorMessage(caught), 'error');
+    } finally {
+      setApplyBusy(false);
+    }
+  };
 
   const run = async (text = query) => {
     if (!text.trim()) return;
@@ -358,7 +379,7 @@ function SearchView({ kb }: { kb: ApiKnowledgeBase }) {
     <div className="page" style={{ display: 'flex', gap: 24, alignItems: 'flex-start', flexWrap: 'wrap' }}>
       <div style={{ width: 380, maxWidth: '100%', flex: 'none' }}>
         <h1 style={{ fontSize: 20, fontWeight: 600 }}>检索测试</h1>
-        <p className="muted" style={{ margin: '4px 0 16px' }}>用真实问题验证召回效果；调好的参数可填到应用编排的「检索参数」中。</p>
+        <p className="muted" style={{ margin: '4px 0 16px' }}>用真实问题验证召回效果；调好后可一键写入引用本库的应用。</p>
         <div className="card pad">
           <textarea className="textarea" aria-label="测试问题" placeholder="输入一个用户可能会问的问题" value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void run(); }} />
           <Field label="检索模式">
@@ -371,6 +392,7 @@ function SearchView({ kb }: { kb: ApiKnowledgeBase }) {
           <Field label="重排后保留" hint={kb.rerank_model_id ? '已配置重排模型' : '未配置重排模型'}><Slider label="重排后保留" value={rerankN} min={1} max={20} onChange={setRerankN} /></Field>
           <Field label="最低相关度"><Slider label="最低相关度" value={threshold} min={0} max={1} step={0.05} onChange={setThreshold} /></Field>
           <button className="btn primary" style={{ width: '100%' }} disabled={busy || !query.trim()} onClick={() => void run()}>{busy ? <Spinner /> : <Search size={15} />}测试</button>
+          <button className="btn ghost" style={{ width: '100%', marginTop: 8 }} disabled={!usedBy.length} title={usedBy.length ? undefined : '还没有应用引用本库'} onClick={() => { setTargets(usedBy.map((app) => app.id)); setApplying(true); }}>把这组参数用到应用</button>
         </div>
         {history.length ? <><div className="section-title" style={{ fontSize: 13 }}>本次测试历史</div>{history.map((item) => <button key={item} className="sub-link" onClick={() => { setQuery(item); void run(item); }}><Search size={13} className="muted" />{item}</button>)}</> : null}
       </div>
@@ -400,6 +422,19 @@ function SearchView({ kb }: { kb: ApiKnowledgeBase }) {
           </div>
         </> : <Empty icon={<FlaskConical size={26} />} title="输入问题开始测试" desc="对比不同检索模式下的召回差异，编号类问题建议用混合或全文检索。" />}
       </div>
+      <Modal open={applying} title="把检索参数用到应用" onClose={() => setApplying(false)}
+        footer={<><button className="btn" onClick={() => setApplying(false)}>取消</button><button className="btn primary" disabled={applyBusy || !targets.length} onClick={() => void applyToApps()}>{applyBusy ? <Spinner /> : null}写入草稿</button></>}>
+        <p className="muted" style={{ marginBottom: 12 }}>{({ semantic: '语义', fulltext: '全文', hybrid: '混合' } as const)[mode]}检索 · 初召回 {topK} · 重排保留 {Math.min(rerankN, topK)} · 最低相关度 {threshold}</p>
+        <div className="col" style={{ gap: 6 }}>
+          {usedBy.map((app) => (
+            <label key={app.id} className="row" style={{ border: '1px solid var(--border)', borderRadius: 8, padding: '8px 10px' }}>
+              <input type="checkbox" checked={targets.includes(app.id)} onChange={(event) => setTargets(event.target.checked ? [...targets, app.id] : targets.filter((item) => item !== app.id))} />
+              <span className="grow">{app.name}</span>{app.manifest.knowledge_base_ids.length > 1 ? <span className="faint">同时引用 {app.manifest.knowledge_base_ids.length} 个知识库</span> : null}
+            </label>
+          ))}
+        </div>
+        <p className="faint" style={{ marginTop: 10 }}>参数作用于应用的全部知识库，只修改草稿；重新发布后线上生效。</p>
+      </Modal>
     </div>
   );
 }
