@@ -11,6 +11,13 @@ export type CaseDraft = {
   tags?: string[];
 };
 
+export type DesignRules = {
+  rules: Array<{ key: string; name: string; description: string; needs_knowledge: boolean }>;
+  recommended: string[];
+  has_knowledge: boolean;
+  has_model: boolean;
+};
+
 export const evalApi = {
   list: (appId?: string) => apiFetch<ApiEvaluationSet[]>(`/evaluation-sets${appId ? `?app_id=${appId}` : ''}`),
   get: (id: string) => apiFetch<ApiEvaluationSet>(`/evaluation-sets/${id}`),
@@ -21,6 +28,8 @@ export const evalApi = {
   updateCase: (id: string, caseId: string, payload: Partial<CaseDraft> & { case_type?: 'good' | 'bad' | 'manual' }) => apiFetch<ApiEvaluationCase>(`/evaluation-sets/${id}/cases/${caseId}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteCase: (id: string, caseId: string) => apiFetch<void>(`/evaluation-sets/${id}/cases/${caseId}`, { method: 'DELETE' }),
   run: (id: string) => apiFetch<ApiEvaluationRun>(`/evaluation-sets/${id}/run`, { method: 'POST' }),
+  designRules: (appId: string) => apiFetch<DesignRules>(`/evaluation-sets/design-rules?app_id=${appId}`),
+  aiDesign: (payload: { app_id: string; name?: string; rule_keys: string[]; directions: string; count: number }) => apiFetch<ApiEvaluationSet>('/evaluation-sets/ai-design', { method: 'POST', body: JSON.stringify(payload) }),
   start: (id: string) => apiFetch<ApiEvaluationRun>(`/evaluation-sets/${id}/runs`, { method: 'POST' }),
   step: (id: string, runId: string) => apiFetch<ApiEvaluationRun>(`/evaluation-sets/${id}/runs/${runId}/step`, { method: 'POST' }),
 };

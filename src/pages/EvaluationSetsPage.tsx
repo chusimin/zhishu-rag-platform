@@ -1,16 +1,18 @@
-import { Activity, CheckCircle2, ClipboardCheck, Pencil, Play, Plus, Search, ThumbsDown, ThumbsUp, Trash2, User, XCircle } from 'lucide-react';
+import { Activity, CheckCircle2, ClipboardCheck, Pencil, Play, Plus, Search, Sparkles, ThumbsDown, ThumbsUp, Trash2, User, XCircle } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { errorMessage, type ApiEvaluationCase, type ApiEvaluationRun, type ApiEvaluationSet } from '../api/client';
 import { evalApi, runWithProgress, splitList, type CaseDraft } from '../api/evaluation';
 import { fdeApi, type FDEApp } from '../api/fde';
 import { CHANNEL_LABEL } from '../api/observability';
+import { EvalDesignModal } from '../components/EvalDesignModal';
 import { ConfirmModal, Drawer, Empty, Field, Loading, Modal, Notice, Spinner, Switch, Tag, formatTime, useToast } from '../components/ui';
 
 const CASE_TYPE: Record<ApiEvaluationCase['case_type'], { label: string; tone: string; icon: typeof ThumbsUp }> = {
   good: { label: 'Good', tone: 'green', icon: ThumbsUp },
   bad: { label: 'Bad', tone: 'red', icon: ThumbsDown },
   manual: { label: '手工', tone: 'blue', icon: User },
+  ai: { label: 'AI 设计', tone: 'purple', icon: Sparkles },
 };
 
 type ResultRow = ApiEvaluationRun['results'][number];
@@ -25,16 +27,23 @@ export function EvaluationSetsPage() {
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
   const [creating, setCreating] = useState(false);
+  const [designing, setDesigning] = useState(false);
+  const autoRun = params.get('autorun') === '1';
   const [createForm, setCreateForm] = useState({ app_id: '', name: '', description: '' });
 
+  const initialized = useRef(false);
   const loadList = useCallback(async () => {
     try {
       const [loaded, loadedApps] = await Promise.all([evalApi.list(), fdeApi.list()]);
       setSets(loaded);
       setApps(loadedApps);
       setCreateForm((current) => ({ ...current, app_id: current.app_id || loadedApps.find((app) => app.status !== 'archived')?.id || '' }));
-      // 首次进入未指定评测集时默认选中第一个；只在列表加载时判断，切换评测集不会重新拉列表
-      setParams((current) => (current.get('set') || !loaded[0] ? current : new URLSearchParams({ set: loaded[0].id })), { replace: true });
+      // 只在首次加载、且 URL 没有指定评测集时默认选中第一个。
+      // 注意：setParams 的函数参数拿到的是创建它那次渲染的参数，后续刷新再调用会把旧参数（如 autorun）写回 URL。
+      if (!initialized.current) {
+        initialized.current = true;
+        if (!new URLSearchParams(window.location.search).get('set') && loaded[0]) setParams({ set: loaded[0].id }, { replace: true });
+      }
     } catch (caught) {
       setError(errorMessage(caught));
     }
@@ -54,7 +63,7 @@ export function EvaluationSetsPage() {
   return (
     <div className="sub-layout">
       <aside className="sub-side" style={{ width: 300 }}>
-        <div className="row" style={{ padding: '0 4px 10px' }}><strong className="grow" style={{ fontSize: 16 }}>评测集</strong><button className="btn sm primary" onClick={() => setCreating(true)}><Plus size={13} />新建</button></div>
+        <div className="row" style={{ padding: '0 4px 10px' }}><strong className="grow" style={{ fontSize: 16 }}>评测集</strong><button className="btn sm" onClick={() => setCreating(true)}><Plus size={13} />新建</button><button className="btn sm primary" onClick={() => setDesigning(true)}><Sparkles size={13} />AI 设计</button></div>
         <div className="search-box" style={{ margin: '0 4px 10px' }}><Search size={14} /><input className="input sm" aria-label="搜索评测集" placeholder="搜索评测集或应用" value={search} onChange={(event) => setSearch(event.target.value)} /></div>
         {!sets ? <Loading /> : null}
         {sets && !visible.length ? <p className="faint" style={{ padding: '0 6px' }}>暂无评测集</p> : null}
@@ -68,9 +77,12 @@ export function EvaluationSetsPage() {
       </aside>
       <section className="sub-main">
         {error ? <div className="page"><Notice tone="error">{error}</Notice></div> : null}
-        {sets && !sets.length ? <div className="page"><Empty icon={<ClipboardCheck size={26} />} title="还没有评测集" desc="在「可观测 → 运行 Trace」中把真实对话标记为 Good / Bad Case，或新建评测集手工编写用例。" action={<button className="btn primary" onClick={() => setCreating(true)}><Plus size={15} />新建评测集</button>} /></div> : null}
-        {detail ? <SetDetail key={detail.id} set={detail} onChanged={refresh} /> : selectedId ? <Loading /> : null}
+        {sets && !sets.length ? <div className="page"><Empty icon={<ClipboardCheck size={26} />} title="还没有评测集" desc="在「可观测 → 运行 Trace」中把真实对话标记为 Good / Bad Case，或新建评测集手工编写用例。" action={<div className="row"><button className="btn" onClick={() => setCreating(true)}><Plus size={15} />手工新建</button><button className="btn primary" onClick={() => setDesigning(true)}><Sparkles size={15} />AI 设计评测集</button></div>} /></div> : null}
+        {/* 切换评测集时旧详情还在：只渲染与 URL 一致的那一份，避免自动运行落到上一个评测集 */}
+        {detail && detail.id === selectedId ? <SetDetail key={detail.id} set={detail} onChanged={refresh} autoRun={autoRun} onAutoRunStarted={() => setParams({ set: detail.id }, { replace: true })} /> : selectedId ? <Loading /> : null}
       </section>
+      <EvalDesignModal open={designing} apps={apps} onClose={() => setDesigning(false)}
+        onCreated={async (set, run) => { setDesigning(false); await loadList(); setParams(run ? { set: set.id, autorun: '1' } : { set: set.id }); }} />
       <Modal open={creating} title="新建评测集" onClose={() => setCreating(false)} footer={<><button className="btn" onClick={() => setCreating(false)}>取消</button><button className="btn primary" disabled={!createForm.app_id || !createForm.name.trim()} onClick={async () => {
         try { const set = await evalApi.create({ ...createForm, name: createForm.name.trim() }); setCreating(false); setCreateForm({ ...createForm, name: '', description: '' }); await loadList(); setParams({ set: set.id }); toast('评测集已创建'); } catch (caught) { toast(errorMessage(caught), 'error'); }
       }}>创建</button></>}>
@@ -82,7 +94,7 @@ export function EvaluationSetsPage() {
   );
 }
 
-function SetDetail({ set, onChanged }: { set: ApiEvaluationSet; onChanged: () => Promise<void> }) {
+function SetDetail({ set, onChanged, autoRun, onAutoRunStarted }: { set: ApiEvaluationSet; onChanged: () => Promise<void>; autoRun?: boolean; onAutoRunStarted?: () => void }) {
   const toast = useToast();
   const [running, setRunning] = useState(false);
   const [lastRun, setLastRun] = useState<ApiEvaluationRun | null>(set.latest_run);
@@ -111,6 +123,14 @@ function SetDetail({ set, onChanged }: { set: ApiEvaluationSet; onChanged: () =>
       if (alive.current) setRunning(false);
     }
   };
+  // AI 设计完成后带 autorun 进入：自动开始运行一次
+  const autoStarted = useRef(false);
+  useEffect(() => {
+    if (!autoRun || autoStarted.current || !set.ready_count) return;
+    autoStarted.current = true;
+    onAutoRunStarted?.();
+    void run();
+  }, [autoRun, set.ready_count]);
   const progress = running && lastRun?.total_count ? { done: lastRun.done_count ?? 0, total: lastRun.total_count } : null;
 
   return (

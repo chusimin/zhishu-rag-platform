@@ -1,10 +1,11 @@
-import { Activity, CheckCircle2, ClipboardCheck, Code2, Copy, ExternalLink, Globe, KeyRound, LayoutGrid, Link2, MessageCircle, Play, Plus, RotateCcw, ShieldCheck, Trash2, XCircle } from 'lucide-react';
+import { Activity, CheckCircle2, ClipboardCheck, Sparkles, Code2, Copy, ExternalLink, Globe, KeyRound, LayoutGrid, Link2, MessageCircle, Play, Plus, RotateCcw, ShieldCheck, Trash2, XCircle } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { API_BASE_URL, errorMessage, type ApiEvaluationSet } from '../api/client';
 import { evalApi, runWithProgress } from '../api/evaluation';
 import { fdeApi, type AppShare, type AppVersion, type FDEApp } from '../api/fde';
 import { CHANNEL_LABEL, obsApi, type RunItem } from '../api/observability';
+import { EvalDesignModal } from '../components/EvalDesignModal';
 import { ConfirmModal, Drawer, Empty, Field, Loading, Modal, Notice, Spinner, Switch, Tag, formatCost, formatDuration, formatTime, formatTokens, useToast } from '../components/ui';
 
 /* ------------------------------ 发布渠道 ------------------------------ */
@@ -106,6 +107,7 @@ export function EvalTab({ app }: { app: FDEApp }) {
   const [running, setRunning] = useState('');
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [creating, setCreating] = useState(false);
+  const [designing, setDesigning] = useState(false);
   const [name, setName] = useState('');
   const alive = useRef(true);
   useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
@@ -133,7 +135,8 @@ export function EvalTab({ app }: { app: FDEApp }) {
       <div className="page-head">
         <div className="grow"><h1 style={{ fontSize: 18 }}>评测</h1><p>评测集基于当前草稿运行。设为「发布门禁」的评测集必须全部通过才能发布。</p></div>
         <button className="btn" onClick={() => navigate('/observability?view=runs')}><Activity size={15} />从线上日志回流 Case</button>
-        <button className="btn primary" onClick={() => setCreating(true)}><Plus size={15} />新建评测集</button>
+        <button className="btn" onClick={() => setCreating(true)}><Plus size={15} />手工新建</button>
+        <button className="btn primary" onClick={() => setDesigning(true)}><Sparkles size={15} />AI 设计评测集</button>
       </div>
       {!sets ? <Loading /> : !sets.length ? <Empty icon={<ClipboardCheck size={26} />} title="还没有评测集" desc="在可观测中把真实对话标记为 Good / Bad Case，或手工编写用例。" /> : (
         <table className="table">
@@ -152,6 +155,8 @@ export function EvalTab({ app }: { app: FDEApp }) {
           })}</tbody>
         </table>
       )}
+      <EvalDesignModal open={designing} appId={app.id} onClose={() => setDesigning(false)}
+        onCreated={(set, run) => { setDesigning(false); navigate(`/evaluation-sets?set=${set.id}${run ? '&autorun=1' : ''}`); }} />
       <Modal open={creating} title="新建评测集" onClose={() => { setCreating(false); setName(''); }} footer={<><button className="btn" onClick={() => { setCreating(false); setName(''); }}>取消</button><button className="btn primary" disabled={!name.trim()} onClick={async () => {
         try { const set = await evalApi.create({ app_id: app.id, name: name.trim() }); setCreating(false); setName(''); navigate(`/evaluation-sets?set=${set.id}`); } catch (caught) { toast(errorMessage(caught), 'error'); }
       }}>创建</button></>}>

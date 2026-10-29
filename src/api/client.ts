@@ -388,7 +388,7 @@ export interface ApiEvaluationCase {
   id: string;
   suite_id: string;
   name: string;
-  case_type: 'good' | 'bad' | 'manual';
+  case_type: 'good' | 'bad' | 'manual' | 'ai';
   readiness: 'ready' | 'needs_standard';
   message: string;
   input_values: Record<string, unknown>;
