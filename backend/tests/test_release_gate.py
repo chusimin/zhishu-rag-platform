@@ -86,3 +86,32 @@ async def test_cases_waiting_for_standards_do_not_block_run_or_gate(client: Asyn
     assert ran.status_code == 200, ran.text
     assert ran.json()["passed_count"] == 1 and ran.json()["failed_count"] == 0
     assert await _publish(client, app_id) == 200
+
+
+async def test_stepwise_run_reports_progress_and_satisfies_gate(client: AsyncClient) -> None:
+    app_id = await content_app(client, await priced_mock_llm(client))
+    suite_id = await _gate_suite(client, app_id, "分步", 3)
+    started = await client.post(f"/api/v1/evaluation-sets/{suite_id}/runs", headers=ADMIN)
+    assert started.status_code == 201, started.text
+    run = started.json()
+    assert (run["status"], run["done_count"], run["total_count"]) == ("running", 0, 3)
+
+    step = await client.post(f"/api/v1/evaluation-sets/{suite_id}/runs/{run['id']}/step", headers=ADMIN)
+    assert step.json()["done_count"] == 1 and step.json()["status"] == "running"
+    assert await _publish(client, app_id) == 409  # an unfinished run never opens the gate
+
+    for _ in range(2):
+        step = await client.post(f"/api/v1/evaluation-sets/{suite_id}/runs/{run['id']}/step", headers=ADMIN)
+    body = step.json()
+    assert (body["status"], body["done_count"], body["passed_count"]) == ("success", 3, 3)
+    assert await _publish(client, app_id) == 200
+
+
+async def test_stepwise_run_stops_when_draft_changes(client: AsyncClient) -> None:
+    app_id = await content_app(client, await priced_mock_llm(client))
+    suite_id = await _gate_suite(client, app_id, "分步", 2)
+    run = (await client.post(f"/api/v1/evaluation-sets/{suite_id}/runs", headers=ADMIN)).json()
+    draft = (await client.get(f"/api/v1/fde/apps/{app_id}", headers=ADMIN)).json()["manifest"]
+    draft["system_prompt"] += "\n改动"
+    await client.put(f"/api/v1/fde/apps/{app_id}/manifest", headers=ADMIN, json={"manifest": draft})
+    assert (await client.post(f"/api/v1/evaluation-sets/{suite_id}/runs/{run['id']}/step", headers=ADMIN)).status_code == 409

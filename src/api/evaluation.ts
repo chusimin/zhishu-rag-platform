@@ -21,7 +21,23 @@ export const evalApi = {
   updateCase: (id: string, caseId: string, payload: Partial<CaseDraft> & { case_type?: 'good' | 'bad' | 'manual' }) => apiFetch<ApiEvaluationCase>(`/evaluation-sets/${id}/cases/${caseId}`, { method: 'PATCH', body: JSON.stringify(payload) }),
   deleteCase: (id: string, caseId: string) => apiFetch<void>(`/evaluation-sets/${id}/cases/${caseId}`, { method: 'DELETE' }),
   run: (id: string) => apiFetch<ApiEvaluationRun>(`/evaluation-sets/${id}/run`, { method: 'POST' }),
+  start: (id: string) => apiFetch<ApiEvaluationRun>(`/evaluation-sets/${id}/runs`, { method: 'POST' }),
+  step: (id: string, runId: string) => apiFetch<ApiEvaluationRun>(`/evaluation-sets/${id}/runs/${runId}/step`, { method: 'POST' }),
 };
+
+/**
+ * 逐个 Case 运行评测并回报进度。传入 resume 可继续一次中断的运行。
+ * shouldStop 返回 true 时停止发起下一步（例如组件已卸载）。
+ */
+export async function runWithProgress(setId: string, onProgress: (run: ApiEvaluationRun) => void, options: { resume?: ApiEvaluationRun; shouldStop?: () => boolean } = {}) {
+  let run = options.resume ?? await evalApi.start(setId);
+  onProgress(run);
+  while (run.status === 'running' && !options.shouldStop?.()) {
+    run = await evalApi.step(setId, run.id);
+    onProgress(run);
+  }
+  return run;
+}
 
 export function splitList(value: string) {
   return value.split(/[\n,，、]+/).map((item) => item.trim()).filter(Boolean);

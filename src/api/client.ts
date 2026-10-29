@@ -366,6 +366,9 @@ export interface ApiEvaluationRun {
   simulated: boolean;
   /** 该次运行评测的配置是否就是当前草稿；草稿改动后需重新运行才能作为发布门禁依据。 */
   matches_draft?: boolean;
+  /** 分步运行的进度：已评测 / 本次应评测的 Case 数。 */
+  done_count?: number;
+  total_count?: number;
   results: Array<{
     case_id: string;
     name: string;

@@ -175,6 +175,7 @@ async def _set_payload(session: AsyncSession, suite: EvaluationSuite, app: QAApp
             "simulated": latest_run.simulated,
             "results": latest_run.results,
             "created_at": latest_run.created_at,
+            "done_count": len(latest_run.results),
             "matches_draft": latest_run.manifest_hash is not None and latest_run.manifest_hash == manifest_fingerprint(Manifest.model_validate(app.draft_manifest) if app.draft_manifest else manifest_from_qa_app(app)),
         },
     }
@@ -443,62 +444,130 @@ def _normalized(value: str) -> str:
     return re.sub(r"\s+", "", value).lower()
 
 
+async def _evaluate_case(session: AsyncSession, manifest: Manifest, case: EvaluationCase, workspace_id: str) -> dict[str, Any]:
+    reasons: list[str] = []
+    try:
+        input_values = dict(case.input_values)
+        missing_required_text = [
+            field
+            for field in manifest.input_fields
+            if field.required
+            and field.type in {"text", "textarea"}
+            and not input_values.get(field.key)
+        ]
+        if len(missing_required_text) == 1:
+            input_values[missing_required_text[0].key] = case.message
+        result = await execute_manifest(session, manifest, message=case.message, input_values=input_values, workspace_id=workspace_id)
+        content = result["content"]
+        lowered = content.lower()
+        missing = [item for item in case.expected_keywords if item.lower() not in lowered]
+        forbidden = [item for item in case.forbidden_keywords if item.lower() in lowered]
+        if missing:
+            reasons.append(f"缺少期望关键词：{'、'.join(missing)}")
+        if forbidden:
+            reasons.append(f"包含禁止关键词：{'、'.join(forbidden)}")
+        if case.require_citations and not result["citations"]:
+            reasons.append("没有引用来源")
+        has_explicit_rules = bool(case.expected_keywords or case.forbidden_keywords or case.require_citations)
+        if case.case_type != "good" and case.expected_output and not has_explicit_rules and _normalized(content) != _normalized(case.expected_output):
+            reasons.append("输出与标准答案不一致")
+        return {"case_id": case.id, "name": case.name, "passed": not reasons, "reasons": reasons, "output": content, "simulated": result["simulated"]}
+    except Exception as exc:
+        return {"case_id": case.id, "name": case.name, "passed": False, "reasons": [str(exc)], "output": "", "simulated": False}
+
+
+def _ready_cases(suite: EvaluationSuite) -> list[EvaluationCase]:
+    # 待补标准的 Case 不参与运行，也不计入发布门禁；全部待补时才拒绝运行
+    ready = [item for item in suite.cases if item.readiness == "ready"]
+    if not suite.cases:
+        raise HTTPException(status_code=422, detail="评测集还没有 Case")
+    if not ready:
+        raise HTTPException(status_code=409, detail=f"{len(suite.cases)} 个 Case 都待补评测标准，补齐后才能运行")
+    return ready
+
+
+def _draft_manifest(app: QAApp) -> Manifest:
+    return Manifest.model_validate(app.draft_manifest) if app.draft_manifest else manifest_from_qa_app(app)
+
+
+def _run_payload(run: EvaluationRun, total: int) -> dict[str, Any]:
+    return {
+        "id": run.id, "status": run.status, "passed_count": run.passed_count, "failed_count": run.failed_count, "results": run.results,
+        "simulated": run.simulated, "created_at": run.created_at, "matches_draft": True, "total_count": total, "done_count": len(run.results),
+    }
+
+
+def _finish(run: EvaluationRun, session: AsyncSession, context: AuthContext, suite: EvaluationSuite) -> None:
+    run.passed_count = sum(item["passed"] for item in run.results)
+    run.failed_count = len(run.results) - run.passed_count
+    run.status = RunStatus.SUCCESS if not run.failed_count else RunStatus.FAILED
+    session.add(AuditEvent(workspace_id=context.workspace_id, actor_id=context.user_id, action="evaluation_set.run", resource_type="evaluation_set", resource_id=suite.id, detail={"passed": run.passed_count, "failed": run.failed_count}))
+
+
 @router.post("/{suite_id}/run")
 async def run_evaluation_set(
     suite_id: str,
     context: AuthContext = Depends(require_roles("admin", "manager")),
     session: AsyncSession = Depends(get_session),
 ) -> dict[str, Any]:
+    """一次性运行全部可运行 Case（API 调用方使用；界面使用分步运行以展示进度）。"""
     suite, app = await _suite(session, suite_id, context.workspace_id, with_cases=True)
-    if not suite.cases:
-        raise HTTPException(status_code=422, detail="评测集还没有 Case")
-    # 待补标准的 Case 不参与本次运行，也不计入发布门禁；全部待补时才拒绝运行
-    ready_cases = [item for item in suite.cases if item.readiness == "ready"]
-    if not ready_cases:
-        raise HTTPException(status_code=409, detail=f"{len(suite.cases)} 个 Case 都待补评测标准，补齐后才能运行")
-
-    manifest = Manifest.model_validate(app.draft_manifest) if app.draft_manifest else manifest_from_qa_app(app)
+    ready_cases = _ready_cases(suite)
+    manifest = _draft_manifest(app)
     run = EvaluationRun(suite_id=suite.id, status=RunStatus.RUNNING, manifest_hash=manifest_fingerprint(manifest))
-    results: list[dict[str, Any]] = []
-    for case in ready_cases:
-        reasons: list[str] = []
-        try:
-            input_values = dict(case.input_values)
-            missing_required_text = [
-                field
-                for field in manifest.input_fields
-                if field.required
-                and field.type in {"text", "textarea"}
-                and not input_values.get(field.key)
-            ]
-            if len(missing_required_text) == 1:
-                input_values[missing_required_text[0].key] = case.message
-            result = await execute_manifest(session, manifest, message=case.message, input_values=input_values, workspace_id=context.workspace_id)
-            content = result["content"]
-            lowered = content.lower()
-            missing = [item for item in case.expected_keywords if item.lower() not in lowered]
-            forbidden = [item for item in case.forbidden_keywords if item.lower() in lowered]
-            if missing:
-                reasons.append(f"缺少期望关键词：{'、'.join(missing)}")
-            if forbidden:
-                reasons.append(f"包含禁止关键词：{'、'.join(forbidden)}")
-            if case.require_citations and not result["citations"]:
-                reasons.append("没有引用来源")
-            has_explicit_rules = bool(case.expected_keywords or case.forbidden_keywords or case.require_citations)
-            if case.case_type != "good" and case.expected_output and not has_explicit_rules and _normalized(content) != _normalized(case.expected_output):
-                reasons.append("输出与标准答案不一致")
-            results.append({"case_id": case.id, "name": case.name, "passed": not reasons, "reasons": reasons, "output": content, "simulated": result["simulated"]})
-            run.simulated = run.simulated or result["simulated"]
-        except Exception as exc:
-            results.append({"case_id": case.id, "name": case.name, "passed": False, "reasons": [str(exc)], "output": "", "simulated": False})
-    run.passed_count = sum(item["passed"] for item in results)
-    run.failed_count = len(results) - run.passed_count
-    run.status = RunStatus.SUCCESS if not run.failed_count else RunStatus.FAILED
+    results = [await _evaluate_case(session, manifest, case, context.workspace_id) for case in ready_cases]
     run.results = results
+    run.simulated = any(item["simulated"] for item in results)
     session.add(run)
-    session.add(AuditEvent(workspace_id=context.workspace_id, actor_id=context.user_id, action="evaluation_set.run", resource_type="evaluation_set", resource_id=suite.id, detail={"passed": run.passed_count, "failed": run.failed_count}))
+    _finish(run, session, context, suite)
     await session.commit()
-    return {"id": run.id, "status": run.status, "passed_count": run.passed_count, "failed_count": run.failed_count, "results": results, "simulated": run.simulated, "created_at": run.created_at, "matches_draft": True}
+    return _run_payload(run, len(ready_cases))
+
+
+@router.post("/{suite_id}/runs", status_code=201)
+async def start_evaluation_run(
+    suite_id: str,
+    context: AuthContext = Depends(require_roles("admin", "manager")),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    """开始分步运行：只创建运行记录，随后逐次调用 /step 评测一个 Case，界面据此显示进度。"""
+    suite, app = await _suite(session, suite_id, context.workspace_id, with_cases=True)
+    ready_cases = _ready_cases(suite)
+    run = EvaluationRun(suite_id=suite.id, status=RunStatus.RUNNING, manifest_hash=manifest_fingerprint(_draft_manifest(app)), results=[])
+    session.add(run)
+    await session.commit()
+    return _run_payload(run, len(ready_cases))
+
+
+@router.post("/{suite_id}/runs/{run_id}/step")
+async def step_evaluation_run(
+    suite_id: str,
+    run_id: str,
+    context: AuthContext = Depends(require_roles("admin", "manager")),
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, Any]:
+    suite, app = await _suite(session, suite_id, context.workspace_id, with_cases=True)
+    run = await session.scalar(select(EvaluationRun).where(EvaluationRun.id == run_id, EvaluationRun.suite_id == suite.id))
+    if not run:
+        raise HTTPException(status_code=404, detail="评测运行不存在")
+    ready_cases = _ready_cases(suite)
+    if run.status != RunStatus.RUNNING:
+        return _run_payload(run, len(ready_cases))
+    manifest = _draft_manifest(app)
+    if manifest_fingerprint(manifest) != run.manifest_hash:
+        raise HTTPException(status_code=409, detail="应用草稿在评测过程中被修改，请重新开始评测")
+    done = {item["case_id"] for item in run.results}
+    remaining = [case for case in ready_cases if case.id not in done]
+    if remaining:
+        result = await _evaluate_case(session, manifest, remaining[0], context.workspace_id)
+        run.results = [*run.results, result]  # 重新赋值，确保 JSON 列被标记为已修改
+        run.simulated = run.simulated or result["simulated"]
+        run.passed_count = sum(item["passed"] for item in run.results)
+        run.failed_count = len(run.results) - run.passed_count
+    if len(remaining) <= 1:
+        _finish(run, session, context, suite)
+    await session.commit()
+    return _run_payload(run, len(ready_cases))
 
 
 @router.post("/{suite_id}/cases", status_code=201)

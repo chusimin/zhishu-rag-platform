@@ -1,8 +1,8 @@
 import { Activity, CheckCircle2, ClipboardCheck, Code2, Copy, ExternalLink, Globe, KeyRound, LayoutGrid, Link2, MessageCircle, Play, Plus, RotateCcw, ShieldCheck, Trash2, XCircle } from 'lucide-react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { API_BASE_URL, errorMessage, type ApiEvaluationSet } from '../api/client';
-import { evalApi } from '../api/evaluation';
+import { evalApi, runWithProgress } from '../api/evaluation';
 import { fdeApi, type AppShare, type AppVersion, type FDEApp } from '../api/fde';
 import { CHANNEL_LABEL, obsApi, type RunItem } from '../api/observability';
 import { ConfirmModal, Drawer, Empty, Field, Loading, Modal, Notice, Spinner, Switch, Tag, formatCost, formatDuration, formatTime, formatTokens, useToast } from '../components/ui';
@@ -104,8 +104,11 @@ export function EvalTab({ app }: { app: FDEApp }) {
   const navigate = useNavigate();
   const [sets, setSets] = useState<ApiEvaluationSet[] | null>(null);
   const [running, setRunning] = useState('');
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
 
   const load = useCallback(() => evalApi.list(app.id).then(setSets).catch((caught) => toast(errorMessage(caught), 'error')), [app.id, toast]);
   useEffect(() => { void load(); }, [load]);
@@ -113,13 +116,15 @@ export function EvalTab({ app }: { app: FDEApp }) {
   const runSet = async (set: ApiEvaluationSet) => {
     setRunning(set.id);
     try {
-      const result = await evalApi.run(set.id);
-      toast(`评测完成：${result.passed_count} 通过，${result.failed_count} 未通过`);
+      const resume = set.latest_run?.status === 'running' ? set.latest_run : undefined;
+      const result = await runWithProgress(set.id, (run) => { if (alive.current) setProgress({ done: run.done_count ?? 0, total: run.total_count ?? set.ready_count }); }, { resume, shouldStop: () => !alive.current });
+      if (!alive.current) return;
+      if (result.status !== 'running') toast(`评测完成：${result.passed_count} 通过，${result.failed_count} 未通过`);
       await load();
     } catch (caught) {
       toast(errorMessage(caught), 'error');
     } finally {
-      setRunning('');
+      if (alive.current) { setRunning(''); setProgress(null); }
     }
   };
 
@@ -139,9 +144,9 @@ export function EvalTab({ app }: { app: FDEApp }) {
               <tr key={set.id}>
                 <td><Link to={`/evaluation-sets?set=${set.id}`} style={{ fontWeight: 500 }}>{set.name}</Link><div className="faint">{set.description}</div></td>
                 <td>{set.case_count}{set.needs_standard_count ? <Tag tone="orange">{set.needs_standard_count} 待补标准</Tag> : null}</td>
-                <td>{run ? (run.failed_count ? <Tag tone="red"><XCircle size={12} />{run.passed_count}/{run.passed_count + run.failed_count} 通过</Tag> : <Tag tone="green"><CheckCircle2 size={12} />全部通过</Tag>) : <span className="faint">未运行</span>}{run?.matches_draft === false ? <Tag tone="orange">草稿已改动，需重跑</Tag> : null}{run ? <div className="faint">{formatTime(run.created_at)}</div> : null}</td>
+                <td>{run?.status === 'running' && running !== set.id ? <Tag tone="orange">中断于 {run.done_count ?? run.results.length}/{set.ready_count}</Tag> : run ? (run.failed_count ? <Tag tone="red"><XCircle size={12} />{run.passed_count}/{run.passed_count + run.failed_count} 通过</Tag> : <Tag tone="green"><CheckCircle2 size={12} />全部通过</Tag>) : <span className="faint">未运行</span>}{run?.matches_draft === false ? <Tag tone="orange">草稿已改动，需重跑</Tag> : null}{run ? <div className="faint">{formatTime(run.created_at)}</div> : null}</td>
                 <td><Switch on={set.is_release_gate} label="发布门禁" onChange={async (value) => { try { await evalApi.update(set.id, { is_release_gate: value }); toast(value ? '已设为发布门禁' : '已取消门禁'); void load(); } catch (caught) { toast(errorMessage(caught), 'error'); } }} /></td>
-                <td><button className="btn sm" disabled={running === set.id || !set.ready_count} title={!set.ready_count ? '没有可运行的 Case' : set.needs_standard_count ? `${set.needs_standard_count} 条待补标准的 Case 会被跳过` : undefined} onClick={() => void runSet(set)}>{running === set.id ? <Spinner size={12} /> : <Play size={13} />}运行</button></td>
+                <td><button className="btn sm" disabled={running === set.id || !set.ready_count} title={!set.ready_count ? '没有可运行的 Case' : set.needs_standard_count ? `${set.needs_standard_count} 条待补标准的 Case 会被跳过` : undefined} onClick={() => void runSet(set)}>{running === set.id ? <Spinner size={12} /> : <Play size={13} />}{running === set.id && progress ? `${progress.done}/${progress.total}` : run?.status === 'running' ? '继续' : '运行'}</button></td>
               </tr>
             );
           })}</tbody>

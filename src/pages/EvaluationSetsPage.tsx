@@ -1,8 +1,8 @@
 import { Activity, CheckCircle2, ClipboardCheck, Pencil, Play, Plus, Search, ThumbsDown, ThumbsUp, Trash2, User, XCircle } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { errorMessage, type ApiEvaluationCase, type ApiEvaluationRun, type ApiEvaluationSet } from '../api/client';
-import { evalApi, splitList, type CaseDraft } from '../api/evaluation';
+import { evalApi, runWithProgress, splitList, type CaseDraft } from '../api/evaluation';
 import { fdeApi, type FDEApp } from '../api/fde';
 import { CHANNEL_LABEL } from '../api/observability';
 import { ConfirmModal, Drawer, Empty, Field, Loading, Modal, Notice, Spinner, Switch, Tag, formatTime, useToast } from '../components/ui';
@@ -95,19 +95,23 @@ function SetDetail({ set, onChanged }: { set: ApiEvaluationSet; onChanged: () =>
   const results = useMemo(() => Object.fromEntries((lastRun?.results ?? []).map((item) => [item.case_id, item])) as Record<string, ResultRow>, [lastRun]);
   const visible = cases.filter((item) => filter === 'all' || (filter === 'needs_standard' ? item.readiness === 'needs_standard' : results[item.id] && !results[item.id].passed));
 
-  const run = async () => {
+  const alive = useRef(true);
+  useEffect(() => () => { alive.current = false; }, []);
+  const interrupted = lastRun?.status === 'running' && !running ? lastRun : null;
+  const run = async (resume?: ApiEvaluationRun) => {
     setRunning(true);
     try {
-      const result = await evalApi.run(set.id);
-      setLastRun(result);
-      toast(`评测完成：${result.passed_count} 通过，${result.failed_count} 未通过`);
+      const result = await runWithProgress(set.id, (progress) => { if (alive.current) setLastRun(progress); }, { resume, shouldStop: () => !alive.current });
+      if (!alive.current) return;
+      if (result.status !== 'running') toast(`评测完成：${result.passed_count} 通过，${result.failed_count} 未通过`);
       await onChanged();
     } catch (caught) {
       toast(errorMessage(caught), 'error');
     } finally {
-      setRunning(false);
+      if (alive.current) setRunning(false);
     }
   };
+  const progress = running && lastRun?.total_count ? { done: lastRun.done_count ?? 0, total: lastRun.total_count } : null;
 
   return (
     <div className="page">
@@ -118,16 +122,23 @@ function SetDetail({ set, onChanged }: { set: ApiEvaluationSet; onChanged: () =>
         </div>
         <label className="row faint" style={{ fontSize: 13 }}>发布门禁<Switch on={set.is_release_gate} label="发布门禁" onChange={async (value) => { try { await evalApi.update(set.id, { is_release_gate: value }); toast(value ? '已设为发布门禁：最近一次评测全部通过才能发布' : '已取消门禁'); await onChanged(); } catch (caught) { toast(errorMessage(caught), 'error'); } }} /></label>
         <button className="btn" onClick={() => setAdding(true)}><Plus size={15} />新增 Case</button>
-        <button className="btn primary" disabled={running || !set.ready_count} title={!set.ready_count ? '没有可运行的 Case' : set.needs_standard_count ? `${set.needs_standard_count} 条待补标准的 Case 不参与本次运行` : undefined} onClick={() => void run()}>{running ? <Spinner /> : <Play size={15} />}{running ? '运行中' : '运行评测'}</button>
+        <button className="btn primary" disabled={running || !set.ready_count} title={!set.ready_count ? '没有可运行的 Case' : set.needs_standard_count ? `${set.needs_standard_count} 条待补标准的 Case 不参与本次运行` : undefined} onClick={() => void run()}>{running ? <Spinner /> : <Play size={15} />}{running ? (progress ? `运行中 ${progress.done}/${progress.total}` : '运行中') : interrupted ? '重新运行' : '运行评测'}</button>
       </div>
 
       <div className="grid c4" style={{ marginBottom: 16 }}>
         <div className="card stat"><div className="label">Case 总数</div><div className="value">{set.case_count}</div></div>
         <div className="card stat"><div className="label">可运行</div><div className="value">{set.ready_count}</div></div>
         <div className="card stat"><div className="label">待补标准</div><div className="value" style={{ color: set.needs_standard_count ? '#b54708' : undefined }}>{set.needs_standard_count}</div></div>
-        <div className="card stat"><div className="label">最近通过率</div><div className="value" style={{ color: lastRun ? (lastRun.failed_count ? 'var(--red)' : 'var(--green)') : undefined }}>{lastRun ? `${Math.round((lastRun.passed_count / Math.max(1, lastRun.passed_count + lastRun.failed_count)) * 100)}%` : '—'}</div>{lastRun ? <div className="faint">{formatTime(lastRun.created_at)}{lastRun.simulated ? ' · 含测试替身' : ''}</div> : null}</div>
+        <div className="card stat"><div className="label">{lastRun?.status === 'running' ? '本次进行中' : '最近通过率'}</div><div className="value" style={{ color: lastRun ? (lastRun.failed_count ? 'var(--red)' : 'var(--green)') : undefined }}>{lastRun ? `${Math.round((lastRun.passed_count / Math.max(1, lastRun.passed_count + lastRun.failed_count)) * 100)}%` : '—'}</div>{lastRun ? <div className="faint">{formatTime(lastRun.created_at)}{lastRun.simulated ? ' · 含测试替身' : ''}</div> : null}</div>
       </div>
-      {running ? <div style={{ marginBottom: 12 }}><Notice tone="info" title={`正在运行 ${set.ready_count} 条 Case`}>每条 Case 都会真实调用一次应用，耗时取决于模型速度，请保持页面打开。</Notice></div> : null}
+      {running ? (
+        <div className="card pad" style={{ marginBottom: 12 }}>
+          <div className="row" style={{ marginBottom: 6 }}><Spinner size={14} /><strong className="grow">正在评测{progress ? ` ${progress.done}/${progress.total}` : ''}</strong>{lastRun ? <span className="faint">{lastRun.passed_count} 通过 · {lastRun.failed_count} 未通过</span> : null}</div>
+          <div className="progress"><i style={{ width: `${progress ? (progress.done / Math.max(1, progress.total)) * 100 : 0}%` }} /></div>
+          <p className="faint" style={{ marginTop: 6 }}>每条 Case 都会真实调用一次应用。离开页面会暂停，回来后可以继续。</p>
+        </div>
+      ) : null}
+      {interrupted ? <div style={{ marginBottom: 12 }}><Notice tone="warn" title={`上次评测在 ${interrupted.done_count ?? interrupted.results.length}/${set.ready_count} 处中断`} action={<button className="btn sm primary" onClick={() => void run(interrupted)}><Play size={13} />继续运行</button>}>未完成的运行不能作为发布门禁依据。</Notice></div> : null}
       {lastRun?.matches_draft === false ? <div style={{ marginBottom: 12 }}><Notice tone="warn" title="应用草稿在最近一次评测后有改动">结果仅供参考；作为发布门禁时需要重新运行。</Notice></div> : null}
       {set.needs_standard_count ? <div style={{ marginBottom: 12 }}><Notice tone="warn" title={`${set.needs_standard_count} 条 Case 待补标准`}>Bad Case 需要填写期望输出、必须包含 / 禁止出现的关键词或引用要求后才会参与评测。运行时会跳过它们，也不计入发布门禁。</Notice></div> : null}
 
