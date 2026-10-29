@@ -242,7 +242,7 @@ export function AppConfigForm({ manifest, patch, templates, models, knowledge, t
               <div className="grow"><strong style={{ fontSize: 13 }}>转人工</strong> <Tag tone="orange">内置</Tag><div className="faint">用户要求人工、投诉赔偿或无法解决时，Agent 可调用转接</div></div>
               <Switch on={manifest.guardrails.human_handoff} onChange={(value) => patch({ guardrails: { ...manifest.guardrails, human_handoff: value } })} label="转人工" />
             </div>
-            {!tools.length ? <p className="faint">还没有可用的业务工具，管理员可在「工具」中接入 HTTP 接口。</p> : null}
+            {!tools.length ? <p className="faint">还没有可用的业务工具，管理员可在「集成 → 业务工具」中接入 HTTP 接口。</p> : null}
           </div>
           <div className="divider" />
           <Field label="单轮最多推理步数"><Slider label="最大步数" value={manifest.agent.max_steps} min={1} max={20} onChange={(value) => patch({ agent: { ...manifest.agent, max_steps: value } })} /></Field>

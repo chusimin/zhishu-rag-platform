@@ -1,4 +1,4 @@
-import { Activity, Blocks, ClipboardCheck, Database, LayoutGrid, LogOut, Settings, Wrench, type LucideIcon } from 'lucide-react';
+import { Activity, Blocks, ClipboardCheck, Database, LayoutGrid, LogOut, Plug, Settings, type LucideIcon } from 'lucide-react';
 import { useEffect, useRef, useState, type PropsWithChildren } from 'react';
 import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { isManager, useAuth } from '../auth';
@@ -15,7 +15,7 @@ export const NAV: NavItem[] = [
   { to: '/knowledge', label: '知识库', icon: Database, roles: STAFF },
   { to: '/observability', label: '可观测', icon: Activity, roles: STAFF },
   { to: '/evaluation-sets', label: '评测集', icon: ClipboardCheck, roles: STAFF },
-  { to: '/tools', label: '工具', icon: Wrench, roles: ['admin'] },
+  { to: '/tools', label: '集成', icon: Plug, roles: ['admin'] },
 ];
 
 const ROLE_LABEL: Record<Role, string> = { admin: '管理员', manager: '应用管理员', user: '业务使用者' };

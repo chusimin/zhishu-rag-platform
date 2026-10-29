@@ -16,7 +16,7 @@ export function ToolsPage() {
   return (
     <div className="page">
       <div className="page-head">
-        <div className="grow"><h1>工具</h1><p>接入模型供应商和业务系统接口，供知识库与应用使用。</p></div>
+        <div className="grow"><h1>集成</h1><p>接入模型服务商和业务系统接口，供知识库与应用使用。</p></div>
       </div>
       <div className="seg" style={{ marginBottom: 16 }}>
         <button className={tab === 'models' ? 'active' : ''} onClick={() => setParams({ tab: 'models' })}><Bot size={14} />模型</button>

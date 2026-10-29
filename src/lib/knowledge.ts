@@ -24,6 +24,23 @@ export function recommendedMethod(filename: string): { method: ChunkMethod; reas
   return { method: 'recursive', reason: '通用文本' };
 }
 
+const QA_HEADER = /(问题|提问|question|^q$)/i;
+const ANSWER_HEADER = /(答案|回答|答复|answer|^a$)/i;
+
+/** 在按扩展名推荐的基础上读取 CSV 表头：前两列像「问题 / 答案」时按问答对切块。 */
+export async function detectRecommendation(file: File): Promise<{ method: ChunkMethod; reason: string }> {
+  const base = recommendedMethod(file.name);
+  if (!/\.csv$/i.test(file.name)) return base;
+  try {
+    const head = (await file.slice(0, 4096).text()).replace(/^\uFEFF/, '').split(/\r?\n/)[0] ?? '';
+    const [first = '', second = ''] = head.split(/[,\t;]/).map((cell) => cell.trim().replace(/^"|"$/g, ''));
+    if (QA_HEADER.test(first) && ANSWER_HEADER.test(second)) return { method: 'qa', reason: '表头为问题 / 答案' };
+  } catch {
+    // 读取失败时沿用扩展名推荐
+  }
+  return base;
+}
+
 export function defaultChunkConfig(kb: ApiKnowledgeBase, method?: ChunkMethod): ApiChunkConfig {
   return {
     method: method ?? kb.chunk_method,

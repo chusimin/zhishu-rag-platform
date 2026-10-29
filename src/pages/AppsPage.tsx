@@ -74,7 +74,7 @@ function CreateModal({ open, onClose, templates, options }: { open: boolean; onC
         <button className={mode === 'blank' ? 'active' : ''} onClick={() => setMode('blank')}><Plus size={14} />空白应用</button>
         <button className={mode === 'ai' ? 'active' : ''} onClick={() => { setMode('ai'); setPlan(null); }}><Sparkles size={14} />AI 帮我搭建</button>
       </div>
-      {!llm ? <div style={{ marginBottom: 12 }}><Notice tone="warn" title="还没有可用的对话模型" action={me?.role === 'admin' ? <Link className="btn sm" to="/tools?tab=models">去接入</Link> : undefined}>{me?.role === 'admin' ? '先接入一个 LLM，应用创建后也可再选择。' : '请联系管理员在「工具 → 模型」接入 LLM，应用创建后也可再选择。'}</Notice></div> : null}
+      {!llm ? <div style={{ marginBottom: 12 }}><Notice tone="warn" title="还没有可用的对话模型" action={me?.role === 'admin' ? <Link className="btn sm" to="/tools?tab=models">去接入</Link> : undefined}>{me?.role === 'admin' ? '先接入一个 LLM，应用创建后也可再选择。' : '请联系管理员在「集成 → 模型」接入 LLM，应用创建后也可再选择。'}</Notice></div> : null}
 
       <Field label="应用类型" required>
         <div className="grid c3" style={{ gap: 10 }}>

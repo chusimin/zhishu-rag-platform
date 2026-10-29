@@ -1,14 +1,14 @@
-import { ArrowLeft, Blocks, Check, CheckCircle2, FileSpreadsheet, FileText, Globe, Plug, Table2, Type, UploadCloud, X, XCircle } from 'lucide-react';
+import { ArrowLeft, Blocks, Check, CheckCircle2, ChevronDown, ChevronRight, FileSpreadsheet, FileText, Globe, Plug, Type, UploadCloud, X, XCircle } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
   API_BASE_URL, apiFetch, errorMessage, type ApiChunkConfig, type ApiChunkPreview, type ApiImportJob, type ApiKnowledgeBase, type ApiKnowledgeFile,
 } from '../api/client';
-import { ChunkConfigFields, MethodPicker } from '../components/ChunkConfigFields';
+import { ChunkConfigFields } from '../components/ChunkConfigFields';
 import { Field, Loading, Notice, Spinner, Tag, formatBytes, useToast } from '../components/ui';
-import { ACTIVE_STATUSES, configProblem, defaultChunkConfig, METHOD_LABEL, recommendedMethod, STAGE_LABEL, type ChunkMethod } from '../lib/knowledge';
+import { ACTIVE_STATUSES, CHUNK_METHODS, configProblem, defaultChunkConfig, detectRecommendation, METHOD_LABEL, STAGE_LABEL, type ChunkMethod } from '../lib/knowledge';
 
-type Source = 'file' | 'web' | 'text' | 'qa' | 'feishu' | 'api';
+type Source = 'file' | 'web' | 'text' | 'feishu' | 'api';
 
 interface Pending {
   id: string;
@@ -26,7 +26,6 @@ const SOURCES: Array<{ key: Source; name: string; icon: typeof UploadCloud; soon
   { key: 'file', name: '本地文件', icon: UploadCloud },
   { key: 'web', name: '网页链接', icon: Globe },
   { key: 'text', name: '自定义文本', icon: Type },
-  { key: 'qa', name: '问答对表格', icon: Table2 },
   { key: 'feishu', name: '飞书文档', icon: Blocks, soon: true },
   { key: 'api', name: 'API 推送', icon: Plug },
 ];
@@ -48,6 +47,7 @@ export function ImportWizardPage() {
   const [uploads, setUploads] = useState<Upload[]>([]);
   const [importing, setImporting] = useState(false);
   const [dragging, setDragging] = useState(false);
+  const [paramsOpen, setParamsOpen] = useState(false);
 
   useEffect(() => {
     apiFetch<ApiKnowledgeBase>(`/knowledge-bases/${kbId}`).then(setKb).catch((caught) => toast(errorMessage(caught), 'error'));
@@ -55,13 +55,16 @@ export function ImportWizardPage() {
 
   const active = items.find((item) => item.id === activeId) ?? items[0];
 
-  const addFiles = (files: File[], forced?: ChunkMethod) => {
+  // 按文件类型（表格还会读表头判断是否为问答对）自动匹配切块方式，进入下一步后可逐个调整
+  const addFiles = async (files: File[]) => {
     if (!kb || !files.length) return;
-    const added = files.map((file) => {
-      const rec = recommendedMethod(file.name);
-      const method = forced ?? rec.method;
-      return { id: crypto.randomUUID(), file, config: defaultChunkConfig(kb, method), recommended: forced ?? rec.method, reason: forced ? '问答对表格' : rec.reason };
-    });
+    const fresh = files.filter((file) => !items.some((item) => item.file.name === file.name && item.file.size === file.size));
+    if (fresh.length < files.length) toast(`已跳过 ${files.length - fresh.length} 个重复文件`);
+    if (!fresh.length) return;
+    const added = await Promise.all(fresh.map(async (file) => {
+      const rec = await detectRecommendation(file);
+      return { id: crypto.randomUUID(), file, config: defaultChunkConfig(kb, rec.method), recommended: rec.method, reason: rec.reason };
+    }));
     setItems((current) => [...current, ...added]);
     setActiveId((current) => current || added[0].id);
   };
@@ -186,22 +189,21 @@ export function ImportWizardPage() {
             ))}
           </div>
           <div style={{ marginTop: 20 }}>
-            {source === 'file' || source === 'qa' ? <>
-              {source === 'qa' ? <div style={{ marginBottom: 12 }}><Notice tone="info" title="问答对格式">CSV 或 Excel：第一列问题、第二列答案，可选第三列为用「|」分隔的相似问法。每行直接成为一个问答分块。</Notice></div> : null}
+            {source === 'file' ? <>
               <label className="upload-zone" style={dragging ? { borderColor: 'var(--primary)', background: 'var(--primary-50)' } : undefined}
                 onDragOver={(event) => { event.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)}
-                onDrop={(event) => { event.preventDefault(); setDragging(false); addFiles(Array.from(event.dataTransfer.files), source === 'qa' ? 'qa' : undefined); }}>
+                onDrop={(event) => { event.preventDefault(); setDragging(false); void addFiles(Array.from(event.dataTransfer.files)); }}>
                 <UploadCloud size={30} color="var(--primary)" />
                 <strong style={{ color: 'var(--text-1)' }}>{dragging ? '松开以添加文件' : '点击或拖拽文件到此处'}</strong>
-                <span>{source === 'qa' ? '支持 CSV、XLSX、XLSM' : '支持 PDF、DOCX、Markdown、图片、XLSX、CSV；按文件类型推荐切块方式'}</span>
-                <input type="file" multiple hidden accept={source === 'qa' ? '.csv,.xlsx,.xlsm' : ACCEPT} onChange={(event) => { addFiles(Array.from(event.target.files ?? []), source === 'qa' ? 'qa' : undefined); event.target.value = ''; }} />
+                <span>支持 PDF、DOCX、Markdown、图片、XLSX、CSV。下一步会按文件自动匹配切块方式，问答对表格（表头含「问题 / 答案」）也会自动识别</span>
+                <input type="file" multiple hidden accept={ACCEPT} onChange={(event) => { void addFiles(Array.from(event.target.files ?? [])); event.target.value = ''; }} />
               </label>
             </> : null}
             {source === 'text' ? (
               <div className="card pad">
                 <Field label="标题" required><input className="input" value={text.title} onChange={(event) => setText({ ...text, title: event.target.value })} placeholder="例如：新品上市统一口径" /></Field>
                 <Field label="内容" required hint="支持 Markdown"><textarea className="textarea" style={{ minHeight: 220 }} value={text.content} onChange={(event) => setText({ ...text, content: event.target.value })} /></Field>
-                <button className="btn" disabled={!text.title.trim() || !text.content.trim()} onClick={() => { addFiles([new File([`# ${text.title.trim()}\n\n${text.content.trim()}\n`], `${text.title.trim().replace(/[\\/:*?"<>|]+/g, '_')}.md`, { type: 'text/markdown' })]); setText({ title: '', content: '' }); }}><FileText size={15} />加入待导入列表</button>
+                <button className="btn" disabled={!text.title.trim() || !text.content.trim()} onClick={() => { void addFiles([new File([`# ${text.title.trim()}\n\n${text.content.trim()}\n`], `${text.title.trim().replace(/[\\/:*?"<>|]+/g, '_')}.md`, { type: 'text/markdown' })]); setText({ title: '', content: '' }); }}><FileText size={15} />加入待导入列表</button>
               </div>
             ) : null}
             {source === 'web' ? (
@@ -232,7 +234,7 @@ export function ImportWizardPage() {
                 {items.map((item) => (
                   <div key={item.id} className="card row" style={{ padding: '10px 14px' }}>
                     {/\.(csv|xlsx|xlsm)$/i.test(item.file.name) ? <FileSpreadsheet size={18} color="#12b76a" /> : <FileText size={18} color="#3370ff" />}
-                    <div className="grow"><div style={{ fontWeight: 500 }}>{item.file.name}</div><div className="faint">{formatBytes(item.file.size)} · 推荐「{METHOD_LABEL[item.recommended]}」（{item.reason}）</div></div>
+                    <div className="grow"><div style={{ fontWeight: 500 }}>{item.file.name}</div><div className="faint">{formatBytes(item.file.size)} · 将按「{METHOD_LABEL[item.recommended]}」切块（{item.reason}）</div></div>
                     <button className="btn ghost sm icon" aria-label={`移除 ${item.file.name}`} onClick={() => setItems((current) => current.filter((entry) => entry.id !== item.id))}><X size={14} /></button>
                   </div>
                 ))}
@@ -243,37 +245,57 @@ export function ImportWizardPage() {
       ) : null}
 
       {step === 2 && active ? (
-        <div style={{ flex: 1, display: 'flex', minHeight: 0, flexWrap: 'wrap' }}>
-          <div style={{ width: 460, maxWidth: '100%', flex: 'none', borderRight: '1px solid var(--border)', overflow: 'auto', padding: 20, maxHeight: '100%' }}>
-            <div className="field-label">文件<span className="hint">每个文件单独设置</span></div>
-            <div className="col" style={{ gap: 6, marginBottom: 18 }}>
-              {items.map((item) => (
-                <button key={item.id} className={`sub-link ${item.id === active.id ? 'active' : ''}`} style={{ border: '1px solid var(--border)' }} onClick={() => setActiveId(item.id)}>
-                  <FileText size={15} /><span className="grow ellipsis">{item.file.name}</span>
-                  {configProblem(item.config, kb) ? <Tag tone="red">需调整</Tag> : <Tag tone={item.id === active.id ? 'blue' : ''}>{METHOD_LABEL[item.config.method]}</Tag>}
-                </button>
-              ))}
+        <div style={{ flex: 1, display: 'flex', minHeight: 0 }}>
+          {/* 左：文件列表，每个文件带自动匹配的切块方式 */}
+          <aside style={{ width: 280, flex: 'none', borderRight: '1px solid var(--border)', overflow: 'auto', padding: 16, background: 'var(--surface)' }}>
+            <div className="field-label">文件 {items.length}<span className="hint">已按格式自动匹配</span></div>
+            <div className="col" style={{ gap: 4 }}>
+              {items.map((item) => {
+                const problem = configProblem(item.config, kb);
+                const table = /\.(csv|xlsx|xlsm)$/i.test(item.file.name);
+                return (
+                  <button key={item.id} className={`sub-link ${item.id === active.id ? 'active' : ''}`} style={{ flexDirection: 'column', alignItems: 'stretch', gap: 2, padding: '8px 10px' }} onClick={() => setActiveId(item.id)}>
+                    <span className="row" style={{ gap: 6 }}>{table ? <FileSpreadsheet size={15} color="#12b76a" /> : <FileText size={15} />}<span className="grow ellipsis">{item.file.name}</span></span>
+                    <span className="row" style={{ gap: 4, paddingLeft: 21 }}>
+                      {problem ? <Tag tone="red">需调整</Tag> : <span className="faint" style={{ fontSize: 12 }}>{METHOD_LABEL[item.config.method]}{item.config.method === item.recommended ? ' · 自动' : ' · 已调整'}</span>}
+                      {item.preview ? <span className="faint" style={{ fontSize: 12 }}>· {item.preview.total_chunks} 块</span> : null}
+                      {item.previewError ? <Tag tone="red">预览失败</Tag> : null}
+                    </span>
+                  </button>
+                );
+              })}
             </div>
-            <div className="field-label">切块方式<span className="hint">推荐：{METHOD_LABEL[active.recommended]}</span></div>
-            <MethodPicker kb={kb} value={active.config.method} recommended={active.recommended} onChange={(method) => patch({ method })}
-              disabled={/\.(csv|xlsx|xlsm)$/i.test(active.file.name) ? [] : ['table_row', 'qa']} />
-            <div className="card pad" style={{ background: 'var(--bg-soft)', marginTop: 16 }}>
-              <strong style={{ display: 'block', marginBottom: 10 }}>{METHOD_LABEL[active.config.method]} · 参数</strong>
-              <ChunkConfigFields config={active.config} patch={patch} kb={kb} />
-              {items.length > 1 ? <button className="btn sm ghost" style={{ color: 'var(--primary)' }} onClick={() => { setItems((current) => current.map((item) => ({ ...item, config: { ...active.config } }))); toast('已应用到全部文件'); }}>应用到全部文件</button> : null}
-            </div>
-          </div>
-          <div style={{ flex: 1, minWidth: 320, display: 'flex', flexDirection: 'column', background: 'var(--bg-soft)', minHeight: 0 }}>
-            <div className="row" style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', background: 'var(--surface)' }}>
-              <strong>真实切块预览</strong><Tag tone="blue">{METHOD_LABEL[active.config.method]}</Tag>
-              <span className="grow" />
-              {active.preview ? <span className="faint">共 <strong style={{ color: 'var(--text-1)' }}>{active.preview.total_chunks}</strong> 块{active.preview.total_chunks > active.preview.returned_chunks ? `（展示前 ${active.preview.returned_chunks} 块）` : ''} · 平均 {Math.round(active.preview.chunks.reduce((sum, chunk) => sum + chunk.char_count, 0) / Math.max(1, active.preview.chunks.length))} 字</span> : null}
-              {previewing ? <Spinner /> : null}
-              {active.config.method === 'semantic' ? <button className="btn sm primary" disabled={previewing} onClick={() => void preview(active)}>调用模型预览</button> : null}
+          </aside>
+
+          {/* 右：当前文件的切块方式、参数与预览 */}
+          <section style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: 'var(--bg-soft)' }}>
+            <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', background: 'var(--surface)' }}>
+              <div className="row" style={{ gap: 10 }}>
+                <strong className="ellipsis" style={{ maxWidth: 320 }}>{active.file.name}</strong>
+                <span className="faint">切块方式</span>
+                <select className="select sm" style={{ width: 200 }} aria-label="切块方式" value={active.config.method} onChange={(event) => patch({ method: event.target.value as ChunkMethod })}>
+                  {CHUNK_METHODS.map((method) => {
+                    const blocked = (['table_row', 'qa'].includes(method.value) && !/\.(csv|xlsx|xlsm)$/i.test(active.file.name)) || (method.needsLlm && !kb.semantic_llm_model_id);
+                    return <option key={method.value} value={method.value} disabled={blocked}>{method.label}{method.value === active.recommended ? '（推荐）' : ''}</option>;
+                  })}
+                </select>
+                <button className="btn sm ghost" aria-expanded={paramsOpen} onClick={() => setParamsOpen(!paramsOpen)}>{paramsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}调整参数</button>
+                <span className="grow" />
+                {active.preview ? <span className="faint">共 <strong style={{ color: 'var(--text-1)' }}>{active.preview.total_chunks}</strong> 块 · 平均 {Math.round(active.preview.chunks.reduce((sum, chunk) => sum + chunk.char_count, 0) / Math.max(1, active.preview.chunks.length))} 字</span> : null}
+                {previewing ? <Spinner /> : null}
+                {active.config.method === 'semantic' ? <button className="btn sm primary" disabled={previewing} onClick={() => void preview(active)}>调用模型预览</button> : null}
+              </div>
+              <div className="faint" style={{ marginTop: 4 }}>{CHUNK_METHODS.find((item) => item.value === active.config.method)?.description}{active.config.method === active.recommended ? `。按「${active.reason}」自动匹配` : ''}</div>
+              {paramsOpen ? (
+                <div style={{ marginTop: 12, maxWidth: 560 }}>
+                  <ChunkConfigFields config={active.config} patch={patch} kb={kb} />
+                  {items.length > 1 ? <button className="btn sm ghost" style={{ color: 'var(--primary)', marginTop: 4 }} onClick={() => { setItems((current) => current.map((item) => ({ ...item, config: { ...active.config } }))); toast('已应用到全部文件'); }}>把当前设置应用到全部文件</button> : null}
+                </div>
+              ) : null}
             </div>
             <div style={{ flex: 1, overflow: 'auto', padding: 20, opacity: previewing ? 0.55 : 1, transition: 'opacity .2s' }}>
               {configProblem(active.config, kb) ? <Notice tone="error">{configProblem(active.config, kb)}</Notice> : null}
-              {active.previewError ? <Notice tone="error" title="预览失败">{active.previewError}</Notice> : null}
+              {active.previewError ? <Notice tone="error" title="预览失败" action={active.previewError.includes('OCR') ? <button className="btn sm" onClick={() => navigate(`/knowledge/${kbId}/settings`)}>去配置 OCR 模型</button> : undefined}>{active.previewError}</Notice> : null}
               {active.config.enhance_keywords || active.config.enhance_qa ? <div style={{ marginBottom: 8 }}><Notice tone="info">{[active.config.enhance_keywords ? '关键词' : '', active.config.enhance_qa ? '问答对' : ''].filter(Boolean).join('和')}会在导入时生成，预览只展示切块结果。</Notice></div> : null}
               {active.preview?.warnings.map((warning) => <div key={warning} style={{ marginBottom: 8 }}><Notice tone="warn">{warning}</Notice></div>)}
               {!active.preview && !active.previewError && !previewing ? <p className="faint">{active.config.method === 'semantic' ? '语义分块会调用模型，点击右上角按钮生成预览。' : '正在生成预览…'}</p> : null}
@@ -287,7 +309,7 @@ export function ImportWizardPage() {
                 ))}
               </div>
             </div>
-          </div>
+          </section>
         </div>
       ) : null}
 

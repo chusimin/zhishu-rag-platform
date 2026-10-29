@@ -5,7 +5,7 @@ import { apiFetch, errorMessage, type ApiKnowledgeBase, type ApiModelOption } fr
 import { fdeApi, type FDEApp } from '../api/fde';
 import { useAuth } from '../auth';
 import { Empty, Field, Loading, Modal, Notice, Spinner, Tag, formatTime, useToast } from '../components/ui';
-import { CHUNK_METHODS, METHOD_LABEL, modelsOf, type ChunkMethod } from '../lib/knowledge';
+import { modelsOf } from '../lib/knowledge';
 
 const COLORS = ['#3370ff', '#12b76a', '#7a5af8', '#f79009', '#dd2590', '#0e9384'];
 
@@ -20,7 +20,7 @@ export function KnowledgeListPage() {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const { me } = useAuth();
-  const [form, setForm] = useState({ name: '', description: '', embedding_model_id: '', rerank_model_id: '', ocr_model_id: '', llm_id: '', chunk_method: 'recursive' as ChunkMethod });
+  const [form, setForm] = useState({ name: '', description: '', embedding_model_id: '', rerank_model_id: '', ocr_model_id: '', llm_id: '' });
 
   useEffect(() => {
     Promise.all([apiFetch<ApiKnowledgeBase[]>('/knowledge-bases'), apiFetch<ApiModelOption[]>('/model-options'), fdeApi.list()])
@@ -52,7 +52,6 @@ export function KnowledgeListPage() {
           ocr_model_id: form.ocr_model_id || null,
           semantic_llm_model_id: form.llm_id || null,
           metadata_llm_model_id: form.llm_id || null,
-          chunk_method: form.chunk_method,
         }),
       });
       toast(`已创建「${created.name}」，下一步导入数据`);
@@ -89,7 +88,7 @@ export function KnowledgeListPage() {
               <span className="avatar-tile lg" style={{ background: COLORS[index % COLORS.length] }}><BookText size={20} /></span>
               <div className="grow">
                 <strong style={{ fontSize: 15 }}>{kb.name}</strong>
-                <div className="row" style={{ marginTop: 4 }}><Tag>默认 {METHOD_LABEL[kb.chunk_method]}</Tag>{kb.embedding_model_id ? null : <Tag tone="orange">未配置索引模型</Tag>}</div>
+                <div className="row" style={{ marginTop: 4 }}>{kb.embedding_model_id ? null : <Tag tone="orange">未配置索引模型</Tag>}</div>
               </div>
             </div>
             <p className="muted clamp-2" style={{ fontSize: 13, marginTop: 10, minHeight: 42 }}>{kb.description || '暂无简介'}</p>
@@ -115,11 +114,6 @@ export function KnowledgeListPage() {
           <Field label="文本理解模型" hint="语义分块、元数据抽取、问答对生成">{select('llm_id', 'llm', '不使用（规则抽取）')}</Field>
           <Field label="图片理解 / OCR">{select('ocr_model_id', 'ocr', '不处理图片')}</Field>
         </div>
-        <Field label="默认切块方式" hint="导入时仍可逐个文件修改">
-          <select className="select" value={form.chunk_method} onChange={(event) => setForm({ ...form, chunk_method: event.target.value as ChunkMethod })}>
-            {CHUNK_METHODS.filter((item) => !item.needsLlm || form.llm_id).map((item) => <option key={item.value} value={item.value}>{item.label} — {item.bestFor}</option>)}
-          </select>
-        </Field>
         {!modelsOf(options, 'embedding').length ? <Notice tone="warn" title="没有可用的索引模型" action={me?.role === 'admin' ? <Link className="btn sm" to="/tools?tab=models">去接入</Link> : undefined}>{me?.role === 'admin' ? '接入 Embedding 模型后才能语义检索；否则只能使用全文检索。' : '请联系管理员接入 Embedding 模型；否则只能使用全文检索。'}</Notice> : null}
       </Modal>
     </div>

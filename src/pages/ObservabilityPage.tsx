@@ -483,7 +483,7 @@ function UsageView({ days, appId }: { days: number; appId: string }) {
         <div className="card stat"><div className="label">输入 Tokens</div><div className="value">{formatTokens(data.totals.input_tokens)}</div></div>
         <div className="card stat"><div className="label">输出 Tokens</div><div className="value">{formatTokens(data.totals.output_tokens)}</div></div>
       </div>
-      {data.totals.priced_runs < data.totals.runs ? <Notice tone="warn" title="部分运行未计价">没有配置单价的模型不计算费用，也不会被估算。在「工具 → 模型」为模型填写每百万 Tokens 的输入/输出单价。</Notice> : null}
+      {data.totals.priced_runs < data.totals.runs ? <Notice tone="warn" title="部分运行未计价">没有配置单价的模型不计算费用，也不会被估算。在「集成 → 模型」为模型填写每百万 Tokens 的输入/输出单价。</Notice> : null}
       <section className="card pad">
         <div className="row section-row"><strong className="grow">费用归因</strong><div className="seg">{([['app', '按应用'], ['model', '按模型'], ['channel', '按渠道']] as const).map(([key, label]) => <button key={key} className={groupBy === key ? 'active' : ''} onClick={() => setGroupBy(key)}>{label}</button>)}</div></div>
         {!data.items.length ? <p className="faint">该时间段没有运行。</p> : (
