@@ -12,6 +12,7 @@ from ..config import get_settings
 from ..models import DocumentChunk, ImportJob, JobStatus, KnowledgeBase, KnowledgeFile, ModelConfig
 from ..providers import build_gateway
 from .chunking import normalize_chunk_config, split_document
+from .chunk_enhancement import chunk_index_text, enhance_chunks
 from .metadata_extraction import build_embedding_text, extract_document_metadata
 from .ocr import build_ocr, get_ocr
 from .parsers import parse_bytes
@@ -257,6 +258,31 @@ async def process_import_job(
         if not documents:
             raise ValueError("No chunks were produced from the parsed document")
 
+        if chunk_config["enhance_keywords"] or chunk_config["enhance_qa"]:
+            await _update_job(
+                session,
+                job,
+                file,
+                status=JobStatus.CHUNKING,
+                progress=70,
+                stage="chunk_enhancement",
+                detail="为分块抽取关键词、生成问答对",
+            )
+            enhancement_gateway = None
+            enhancement_model_id = knowledge_base.metadata_llm_model_id or knowledge_base.semantic_llm_model_id
+            if enhancement_model_id:
+                enhancement_model = await session.get(ModelConfig, enhancement_model_id)
+                if enhancement_model is None or not enhancement_model.is_enabled or enhancement_model.model_type != "llm":
+                    raise ValueError("Configured text understanding LLM is missing, disabled, or invalid")
+                enhancement_gateway = build_gateway(enhancement_model)
+            await enhance_chunks(
+                documents,
+                qa=chunk_config["enhance_qa"],
+                keywords=chunk_config["enhance_keywords"],
+                qa_count=chunk_config["qa_per_chunk"],
+                gateway=enhancement_gateway,
+            )
+
         if not knowledge_base.embedding_model_id:
             raise ValueError("Knowledge base has no embedding model configured")
         embedding_model = await session.get(ModelConfig, knowledge_base.embedding_model_id)
@@ -273,7 +299,7 @@ async def process_import_job(
             detail=f"调用 {embedding_model.display_name} 生成向量",
         )
         gateway = build_gateway(embedding_model)
-        texts = [build_embedding_text(document.page_content, document_metadata) for document in documents]
+        texts = [build_embedding_text(chunk_index_text(document.page_content, document.metadata), document_metadata) for document in documents]
         vectors: list[list[float]] = []
         batch_size = max(1, get_settings().embedding_batch_size)
         for start in range(0, len(texts), batch_size):

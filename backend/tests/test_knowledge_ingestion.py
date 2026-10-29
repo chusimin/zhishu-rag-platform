@@ -122,7 +122,7 @@ async def test_markdown_import_builds_editable_vectorized_chunks(client: AsyncCl
     assert edited.status_code == 200, edited.text
     assert edited.json()["content"] == "人工修订后的制度内容"
     assert edited.json()["char_count"] == len("人工修订后的制度内容")
-    assert edited.json()["indexed"] is False
+    assert edited.json()["indexed"] is True  # 人工修订后立即重新向量化
 
     duplicate = await client.post(
         f"/api/v1/knowledge-bases/{knowledge_base_id}/files",
@@ -137,7 +137,7 @@ async def test_markdown_import_builds_editable_vectorized_chunks(client: AsyncCl
     )
     assert detail.status_code == 200
     assert detail.json()["file_count"] == 1
-    assert detail.json()["chunk_count"] == len(chunks.json()) - 1
+    assert detail.json()["chunk_count"] == len(chunks.json())
 
     replacement_embedding_id = await _create_mock_embedding(client)
     changed_model = await client.patch(
@@ -298,6 +298,9 @@ async def test_file_chunk_config_is_persisted_and_used_for_ingestion(client: Asy
         "separators": ["\n\n", "\n"],
         "heading_level": 2,
         "rows_per_chunk": 1,
+        "enhance_keywords": False,
+        "enhance_qa": False,
+        "qa_per_chunk": 3,
     }
     content = "# 验收文档\n\n" + "A" * 260
 

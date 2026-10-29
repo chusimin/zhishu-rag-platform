@@ -260,9 +260,16 @@ class ChunkResponse(ORMModel):
     updated_at: datetime
 
 
+class ChunkQAPair(BaseModel):
+    q: str = Field(min_length=1, max_length=300)
+    a: str = Field(min_length=1, max_length=2000)
+
+
 class ChunkUpdate(BaseModel):
     title: str | None = Field(default=None, max_length=500)
     content: str | None = Field(default=None, min_length=1)
+    keywords: list[str] | None = Field(default=None, max_length=20)
+    qa_pairs: list[ChunkQAPair] | None = Field(default=None, max_length=10)
 
 
 class RetrievalRequest(BaseModel):

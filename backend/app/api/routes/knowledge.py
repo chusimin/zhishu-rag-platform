@@ -33,7 +33,8 @@ from ...schemas import (
 from ...security import require_roles
 from ...services.ingestion import process_import_job
 from ...services.chunking import normalize_chunk_config, split_document
-from ...services.metadata_extraction import normalize_document_metadata
+from ...services.chunk_enhancement import chunk_index_text
+from ...services.metadata_extraction import build_embedding_text, normalize_document_metadata
 from ...services.ocr import build_ocr, get_ocr
 from ...services.parsers import SUPPORTED_EXTENSIONS, parse_bytes
 from ...providers import build_gateway
@@ -173,6 +174,12 @@ def serialize_chunk(chunk: DocumentChunk) -> ChunkResponse:
             "updated_at": chunk.updated_at,
         }
     )
+
+
+def _require_enhancement_model(knowledge_base: KnowledgeBase, chunk_config: dict[str, Any]) -> None:
+    """生成问答对必须有文本理解模型；在入队前就拒绝，避免任务进入后台后才失败。"""
+    if chunk_config.get("enhance_qa") and not (knowledge_base.metadata_llm_model_id or knowledge_base.semantic_llm_model_id):
+        raise HTTPException(status_code=422, detail="问答对生成需要先在知识库配置中设置文本理解模型")
 
 
 @router.get("", response_model=list[KnowledgeBaseResponse])
@@ -375,6 +382,7 @@ async def upload_file(
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if chunk_config["method"] == ChunkMethod.SEMANTIC and not knowledge_base.semantic_llm_model_id:
         raise HTTPException(status_code=422, detail="语义分块需要先配置文本理解模型")
+    _require_enhancement_model(knowledge_base, chunk_config)
     checksum = hashlib.sha256(data).hexdigest()
     duplicate = await session.scalar(
         select(KnowledgeFile).where(
@@ -532,6 +540,7 @@ async def import_web_page(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    _require_enhancement_model(knowledge_base, chunk_config)
     file_id = str(uuid4())
     storage_key = f"knowledge-bases/{knowledge_base_id}/{file_id}/{safe_name}"
     storage = get_storage()
@@ -618,11 +627,23 @@ async def update_chunk(
     null_fields = sorted(key for key in ("title", "content") if key in values and values[key] is None)
     if null_fields:
         raise HTTPException(status_code=422, detail=f"Fields cannot be null: {', '.join(null_fields)}")
+    metadata = dict(chunk.metadata_json or {})
+    for key in ("keywords", "qa_pairs"):
+        if key in values:
+            metadata[key] = values.pop(key) or []
+    chunk.metadata_json = metadata
     for key, value in values.items():
         setattr(chunk, key, value)
-    if "content" in values:
-        chunk.char_count = len(chunk.content)
-        chunk.embedding = None
+    chunk.char_count = len(chunk.content)
+    # 内容或增强信息变了：立即按新文本重新向量化；没有可用索引模型时标记为未向量化
+    chunk.embedding = None
+    knowledge_base = await session.get(KnowledgeBase, knowledge_base_id)
+    embedding_model = await session.get(ModelConfig, knowledge_base.embedding_model_id) if knowledge_base and knowledge_base.embedding_model_id else None
+    if embedding_model is not None and embedding_model.is_enabled:
+        text = build_embedding_text(chunk_index_text(chunk.content, metadata), metadata.get("document_metadata"))
+        vectors = await build_gateway(embedding_model).embed_documents([text])
+        if knowledge_base.embedding_dimension in (None, len(vectors[0])):
+            chunk.embedding = vectors[0]
     await session.commit()
     await session.refresh(chunk)
     return serialize_chunk(chunk)
@@ -679,6 +700,7 @@ async def retry_file(
             )
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _require_enhancement_model(knowledge_base, file.chunk_config)
     active_job = await session.scalar(
         select(ImportJob).where(
             ImportJob.file_id == file.id,

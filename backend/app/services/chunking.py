@@ -44,6 +44,10 @@ def normalize_chunk_config(
     if method == ChunkMethod.PARENT_CHILD and child_chunk_size >= parent_chunk_size:
         raise ValueError("child_chunk_size must be smaller than parent_chunk_size")
     separators = [str(item) for item in raw.get("separators", []) if str(item)][:20]
+    try:
+        qa_per_chunk = max(1, min(int(raw.get("qa_per_chunk", 3)), 5))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("切块配置包含无效数字") from exc
     return {
         "method": method,
         "chunk_size": chunk_size,
@@ -53,6 +57,10 @@ def normalize_chunk_config(
         "separators": separators,
         "heading_level": heading_level,
         "rows_per_chunk": rows_per_chunk,
+        # 分块增强：关键词抽取 / 生成问答对
+        "enhance_keywords": bool(raw.get("enhance_keywords", False)),
+        "enhance_qa": bool(raw.get("enhance_qa", False)),
+        "qa_per_chunk": qa_per_chunk,
     }
 
 
