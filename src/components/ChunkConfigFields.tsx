@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { ApiChunkConfig, ApiKnowledgeBase } from '../api/client';
-import { CHUNK_METHODS } from '../lib/knowledge';
-import { Field, Slider, Tag } from './ui';
+import { CHUNK_METHODS, hasTextModel } from '../lib/knowledge';
+import { Field, Slider, Switch, Tag } from './ui';
 
 export function MethodPicker({ value, kb, onChange, recommended, disabled = [] }: { value: ApiChunkConfig['method']; kb: ApiKnowledgeBase; onChange: (method: ApiChunkConfig['method']) => void; recommended?: string; disabled?: string[] }) {
   return (
@@ -22,7 +22,7 @@ export function MethodPicker({ value, kb, onChange, recommended, disabled = [] }
   );
 }
 
-export function ChunkConfigFields({ config, patch }: { config: ApiChunkConfig; patch: (value: Partial<ApiChunkConfig>) => void }) {
+export function ChunkConfigFields({ config, patch, kb }: { config: ApiChunkConfig; patch: (value: Partial<ApiChunkConfig>) => void; kb?: ApiKnowledgeBase }) {
   const sized = ['recursive', 'heading', 'separator', 'fixed'].includes(config.method);
   return (
     <div>
@@ -54,6 +54,7 @@ export function ChunkConfigFields({ config, patch }: { config: ApiChunkConfig; p
       {config.method === 'semantic' ? <p className="faint">由知识库配置的文本理解模型按主题切分；结果必须与原文逐字一致，否则构建失败。会产生额外模型调用。</p> : null}
       {config.method === 'page' ? <p className="faint">PDF 每页一块并保留页码；其他格式按段落处理。</p> : null}
       {config.method === 'qa' ? <p className="faint">CSV / Excel 第一列为问题、第二列为答案，每行一个问答分块。</p> : null}
+      {kb ? <EnhanceFields config={config} patch={patch} kb={kb} /> : null}
     </div>
   );
 }
@@ -69,5 +70,20 @@ function SeparatorInput({ separators, onChange }: { separators: string[]; onChan
   return (
     <textarea className="textarea mono" style={{ minHeight: 80 }} value={text}
       onChange={(event) => { setText(event.target.value); onChange(event.target.value.split('\n').map((item) => item.replace(/\\n/g, '\n')).filter(Boolean)); }} />
+  );
+}
+
+/** 分块增强：导入时为每个分块抽取关键词、生成问答对，提升口语化提问的命中率。 */
+function EnhanceFields({ config, patch, kb }: { config: ApiChunkConfig; patch: (value: Partial<ApiChunkConfig>) => void; kb: ApiKnowledgeBase }) {
+  const llm = hasTextModel(kb);
+  return (
+    <div style={{ borderTop: '1px dashed var(--border)', marginTop: 12, paddingTop: 12 }}>
+      <div className="field-label">分块增强<span className="hint">导入时执行，结果可在分块中查看和修改</span></div>
+      <div className="col" style={{ gap: 10 }}>
+        <div className="row"><span className="grow">抽取关键词<div className="faint">{llm ? '由文本理解模型抽取' : '未配置文本理解模型，按词频规则抽取'}</div></span><Switch on={!!config.enhance_keywords} label="抽取关键词" onChange={(value) => patch({ enhance_keywords: value })} /></div>
+        <div className="row"><span className="grow">生成问答对<Tag tone="purple">LLM</Tag><div className="faint">{llm ? '为每个分块生成它能回答的问题与答案，会产生模型调用' : '需要先在知识库「配置」中设置文本理解模型'}</div></span><Switch on={!!config.enhance_qa} disabled={!llm} label="生成问答对" onChange={(value) => patch({ enhance_qa: value })} /></div>
+        {config.enhance_qa ? <Field label="每块问答数"><Slider label="每块问答数" value={config.qa_per_chunk ?? 3} min={1} max={5} onChange={(value) => patch({ qa_per_chunk: value })} /></Field> : null}
+      </div>
+    </div>
   );
 }

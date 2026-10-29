@@ -259,7 +259,7 @@ export function ImportWizardPage() {
               disabled={/\.(csv|xlsx|xlsm)$/i.test(active.file.name) ? [] : ['table_row', 'qa']} />
             <div className="card pad" style={{ background: 'var(--bg-soft)', marginTop: 16 }}>
               <strong style={{ display: 'block', marginBottom: 10 }}>{METHOD_LABEL[active.config.method]} · 参数</strong>
-              <ChunkConfigFields config={active.config} patch={patch} />
+              <ChunkConfigFields config={active.config} patch={patch} kb={kb} />
               {items.length > 1 ? <button className="btn sm ghost" style={{ color: 'var(--primary)' }} onClick={() => { setItems((current) => current.map((item) => ({ ...item, config: { ...active.config } }))); toast('已应用到全部文件'); }}>应用到全部文件</button> : null}
             </div>
           </div>
@@ -274,6 +274,7 @@ export function ImportWizardPage() {
             <div style={{ flex: 1, overflow: 'auto', padding: 20, opacity: previewing ? 0.55 : 1, transition: 'opacity .2s' }}>
               {configProblem(active.config, kb) ? <Notice tone="error">{configProblem(active.config, kb)}</Notice> : null}
               {active.previewError ? <Notice tone="error" title="预览失败">{active.previewError}</Notice> : null}
+              {active.config.enhance_keywords || active.config.enhance_qa ? <div style={{ marginBottom: 8 }}><Notice tone="info">{[active.config.enhance_keywords ? '关键词' : '', active.config.enhance_qa ? '问答对' : ''].filter(Boolean).join('和')}会在导入时生成，预览只展示切块结果。</Notice></div> : null}
               {active.preview?.warnings.map((warning) => <div key={warning} style={{ marginBottom: 8 }}><Notice tone="warn">{warning}</Notice></div>)}
               {!active.preview && !active.previewError && !previewing ? <p className="faint">{active.config.method === 'semantic' ? '语义分块会调用模型，点击右上角按钮生成预览。' : '正在生成预览…'}</p> : null}
               <div className="col" style={{ gap: 10 }}>

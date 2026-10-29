@@ -67,7 +67,7 @@ export function KnowledgeListPage() {
   const list = (items ?? []).filter((item) => !q || `${item.name}${item.description}`.includes(q));
   const select = (key: keyof typeof form, type: ApiModelOption['model_type'], emptyLabel?: string) => (
     <select className="select" value={form[key]} onChange={(event) => setForm({ ...form, [key]: event.target.value })}>
-      {emptyLabel ? <option value="">{emptyLabel}</option> : null}
+      {emptyLabel ? <option value="">{emptyLabel}</option> : !modelsOf(options, type).length ? <option value="">暂无可用模型</option> : null}
       {modelsOf(options, type).map((model) => <option key={model.id} value={model.id}>{model.display_name} · {model.provider}</option>)}
     </select>
   );
@@ -112,7 +112,7 @@ export function KnowledgeListPage() {
         <div className="form-grid">
           <Field label="索引模型" required hint="更换需全库重建">{select('embedding_model_id', 'embedding')}</Field>
           <Field label="重排模型">{select('rerank_model_id', 'rerank', '不使用')}</Field>
-          <Field label="文本理解模型" hint="语义分块、元数据抽取">{select('llm_id', 'llm', '不使用（规则抽取）')}</Field>
+          <Field label="文本理解模型" hint="语义分块、元数据抽取、问答对生成">{select('llm_id', 'llm', '不使用（规则抽取）')}</Field>
           <Field label="图片理解 / OCR">{select('ocr_model_id', 'ocr', '不处理图片')}</Field>
         </div>
         <Field label="默认切块方式" hint="导入时仍可逐个文件修改">

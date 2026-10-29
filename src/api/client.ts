@@ -181,6 +181,10 @@ export interface ApiChunkConfig {
   separators: string[];
   heading_level: number;
   rows_per_chunk: number;
+  /** 分块增强：抽取关键词 / 生成问答对，写入分块并参与检索。 */
+  enhance_keywords?: boolean;
+  enhance_qa?: boolean;
+  qa_per_chunk?: number;
 }
 
 export interface ApiChunkPreview {

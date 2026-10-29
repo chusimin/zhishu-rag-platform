@@ -34,6 +34,9 @@ export function defaultChunkConfig(kb: ApiKnowledgeBase, method?: ChunkMethod): 
     separators: ['\n\n'],
     heading_level: 3,
     rows_per_chunk: 1,
+    enhance_keywords: false,
+    enhance_qa: false,
+    qa_per_chunk: 3,
   };
 }
 
@@ -42,7 +45,13 @@ export function configProblem(config: ApiChunkConfig, kb: ApiKnowledgeBase): str
   if (config.method === 'parent_child' && config.child_chunk_size >= config.parent_chunk_size) return '子块必须小于父块';
   if (config.method === 'semantic' && !kb.semantic_llm_model_id) return '语义分块需要先在知识库配置中设置文本理解模型';
   if (config.method === 'separator' && !config.separators.length) return '至少填写一个分隔符';
+  if (config.enhance_qa && !hasTextModel(kb)) return '生成问答对需要先在知识库配置中设置文本理解模型';
   return null;
+}
+
+/** 文本理解模型：语义分块、元数据抽取和分块增强共用其一即可。 */
+export function hasTextModel(kb: ApiKnowledgeBase) {
+  return !!(kb.metadata_llm_model_id || kb.semantic_llm_model_id);
 }
 
 export function modelsOf(options: ApiModelOption[], type: ApiModelOption['model_type']) {
@@ -68,6 +77,7 @@ export const STAGE_LABEL: Record<string, string> = {
   metadata_extraction: '元数据抽取',
   metadata_preserved: '保留人工元数据',
   chunking: '切块',
+  chunk_enhancement: '分块增强',
   embedding: '向量化',
   completed: '完成',
   failed: '失败',

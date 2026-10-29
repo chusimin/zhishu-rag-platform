@@ -189,7 +189,7 @@ function FilesView({ kb, onChanged }: { kb: ApiKnowledgeBase; onChanged: () => v
         {rechunk ? <>
           <p className="muted" style={{ marginBottom: 12 }}>会重新解析该文件并替换它的全部分块与向量；人工编辑过的元数据会保留。</p>
           <MethodPicker kb={kb} value={rechunk.config.method} recommended={recommendedMethod(rechunk.file.filename).method} onChange={(method) => setRechunk({ ...rechunk, config: { ...rechunk.config, method } })} />
-          <div style={{ marginTop: 16 }}><ChunkConfigFields config={rechunk.config} patch={(patch) => setRechunk({ ...rechunk, config: { ...rechunk.config, ...patch } })} /></div>
+          <div style={{ marginTop: 16 }}><ChunkConfigFields kb={kb} config={rechunk.config} patch={(patch) => setRechunk({ ...rechunk, config: { ...rechunk.config, ...patch } })} /></div>
           {rechunkProblem ? <Notice tone="error">{rechunkProblem}</Notice> : null}
         </> : null}
       </Modal>
@@ -252,6 +252,10 @@ function MetadataDrawer({ kb, file, onClose, onSaved }: { kb: ApiKnowledgeBase; 
 
 /* ------------------------------ 分块管理 ------------------------------ */
 
+type QAPair = { q: string; a: string };
+const keywordsOf = (chunk: ApiChunk) => (Array.isArray(chunk.metadata_json.keywords) ? chunk.metadata_json.keywords as string[] : []);
+const qaOf = (chunk: ApiChunk) => (Array.isArray(chunk.metadata_json.qa_pairs) ? chunk.metadata_json.qa_pairs as QAPair[] : []);
+
 function ChunksView({ kb }: { kb: ApiKnowledgeBase }) {
   const { fileId = '' } = useParams();
   const toast = useToast();
@@ -259,7 +263,7 @@ function ChunksView({ kb }: { kb: ApiKnowledgeBase }) {
   const [chunks, setChunks] = useState<ApiChunk[] | null>(null);
   const [q, setQ] = useState('');
   const [editing, setEditing] = useState<ApiChunk | null>(null);
-  const [draft, setDraft] = useState({ title: '', content: '' });
+  const [draft, setDraft] = useState<{ title: string; content: string; keywords: string; qa_pairs: QAPair[] }>({ title: '', content: '', keywords: '', qa_pairs: [] });
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
@@ -289,9 +293,11 @@ function ChunksView({ kb }: { kb: ApiKnowledgeBase }) {
       {chunks && !list.length ? <Empty title="没有分块" /> : null}
       <div className="grid c2" style={{ gap: 12 }}>
         {list.map((chunk) => (
-          <button key={chunk.id} className="chunk-card" style={{ textAlign: 'left', cursor: 'pointer' }} onClick={() => { setEditing(chunk); setDraft({ title: chunk.title, content: chunk.content }); }}>
+          <button key={chunk.id} className="chunk-card" style={{ textAlign: 'left', cursor: 'pointer' }} onClick={() => { setEditing(chunk); setDraft({ title: chunk.title, content: chunk.content, keywords: keywordsOf(chunk).join('、'), qa_pairs: qaOf(chunk) }); }}>
             <header><span className="idx">#{chunk.ordinal}</span><span className="ellipsis grow">{chunk.title}</span>{chunk.page_number ? <span>第 {chunk.page_number} 页</span> : null}<span>{chunk.char_count} 字</span>{chunk.indexed ? null : <Tag tone="orange">未向量化</Tag>}</header>
             <div className="body clamp-3">{chunk.content}</div>
+            {keywordsOf(chunk).length ? <div className="row wrap" style={{ gap: 4, marginTop: 6 }}>{keywordsOf(chunk).map((word) => <Tag key={word}>{word}</Tag>)}</div> : null}
+            {qaOf(chunk).length ? <div className="faint" style={{ marginTop: 6 }}>问答对 {qaOf(chunk).length} 组 · {qaOf(chunk)[0].q}{qaOf(chunk).length > 1 ? ' …' : ''}</div> : null}
             {chunk.metadata_json.parent_content ? <div className="faint" style={{ marginTop: 6 }}>父块 {String(chunk.metadata_json.parent_content).length} 字</div> : null}
           </button>
         ))}
@@ -301,14 +307,30 @@ function ChunksView({ kb }: { kb: ApiKnowledgeBase }) {
           if (!editing) return;
           setBusy(true);
           try {
-            const updated = await apiFetch<ApiChunk>(`/knowledge-bases/${kb.id}/chunks/${editing.id}`, { method: 'PATCH', body: JSON.stringify(draft) });
+            const updated = await apiFetch<ApiChunk>(`/knowledge-bases/${kb.id}/chunks/${editing.id}`, { method: 'PATCH', body: JSON.stringify({
+              title: draft.title, content: draft.content,
+              keywords: draft.keywords.split(/[\n,，、]+/).map((item) => item.trim()).filter(Boolean),
+              qa_pairs: draft.qa_pairs.map((item) => ({ q: item.q.trim(), a: item.a.trim() })).filter((item) => item.q && item.a),
+            }) });
             setChunks((current) => current?.map((item) => (item.id === updated.id ? updated : item)) ?? null);
             toast('分块已保存，向量已更新');
             setEditing(null);
           } catch (caught) { toast(errorMessage(caught), 'error'); } finally { setBusy(false); }
         }}>{busy ? <Spinner /> : null}保存</button></>}>
         <Field label="标题"><input className="input" value={draft.title} onChange={(event) => setDraft({ ...draft, title: event.target.value })} /></Field>
-        <Field label="内容" hint={`${draft.content.length} 字`}><textarea className="textarea" style={{ minHeight: 280 }} value={draft.content} onChange={(event) => setDraft({ ...draft, content: event.target.value })} /></Field>
+        <Field label="内容" hint={`${draft.content.length} 字`}><textarea className="textarea" style={{ minHeight: 220 }} value={draft.content} onChange={(event) => setDraft({ ...draft, content: event.target.value })} /></Field>
+        <Field label="关键词" hint="顿号或逗号分隔，参与检索"><input className="input" value={draft.keywords} onChange={(event) => setDraft({ ...draft, keywords: event.target.value })} /></Field>
+        <Field label="问答对" hint="用户可能怎么问、本块怎么答；问题会参与检索">
+          <div className="col" style={{ gap: 8 }}>
+            {draft.qa_pairs.map((pair, index) => (
+              <div key={index} className="card" style={{ padding: 10 }}>
+                <div className="row"><input className="input sm" placeholder="问题" value={pair.q} onChange={(event) => setDraft({ ...draft, qa_pairs: draft.qa_pairs.map((item, i) => (i === index ? { ...item, q: event.target.value } : item)) })} /><button type="button" className="btn ghost sm icon" aria-label="删除问答对" onClick={() => setDraft({ ...draft, qa_pairs: draft.qa_pairs.filter((_, i) => i !== index) })}><Trash2 size={13} /></button></div>
+                <textarea className="textarea" style={{ minHeight: 56, marginTop: 6 }} placeholder="答案" value={pair.a} onChange={(event) => setDraft({ ...draft, qa_pairs: draft.qa_pairs.map((item, i) => (i === index ? { ...item, a: event.target.value } : item)) })} />
+              </div>
+            ))}
+            <button type="button" className="btn sm" style={{ alignSelf: 'flex-start' }} disabled={draft.qa_pairs.length >= 10} onClick={() => setDraft({ ...draft, qa_pairs: [...draft.qa_pairs, { q: '', a: '' }] })}>添加问答对</button>
+          </div>
+        </Field>
         {editing?.metadata_json.parent_content ? <Field label="父块（命中后返回给模型）"><div className="json-view">{String(editing.metadata_json.parent_content)}</div></Field> : null}
       </Drawer>
     </div>
@@ -497,7 +519,7 @@ function SettingsView({ kb, onSaved, usedBy }: { kb: ApiKnowledgeBase; onSaved: 
           <Field label="索引模型" hint="变更后需重建">{select('embedding_model_id', 'embedding', '不使用（仅全文检索）')}</Field>
           <Field label="重排模型">{select('rerank_model_id', 'rerank', '不使用')}</Field>
           <Field label="语义分块模型">{select('semantic_llm_model_id', 'llm', '不使用')}</Field>
-          <Field label="元数据抽取模型">{select('metadata_llm_model_id', 'llm', '规则抽取')}</Field>
+          <Field label="元数据抽取 / 问答对生成模型">{select('metadata_llm_model_id', 'llm', '规则抽取')}</Field>
           <Field label="图片理解 / OCR">{select('ocr_model_id', 'ocr', '不处理图片')}</Field>
         </div>
         {embeddingChanged ? <Notice tone="warn">索引模型变更后，已有向量与新模型不兼容，需要「重建全部索引」后检索才会恢复。</Notice> : null}
