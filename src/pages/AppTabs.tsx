@@ -108,7 +108,7 @@ export function EvalTab({ app }: { app: FDEApp }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
   const alive = useRef(true);
-  useEffect(() => () => { alive.current = false; }, []);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
 
   const load = useCallback(() => evalApi.list(app.id).then(setSets).catch((caught) => toast(errorMessage(caught), 'error')), [app.id, toast]);
   useEffect(() => { void load(); }, [load]);

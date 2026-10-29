@@ -96,7 +96,7 @@ function SetDetail({ set, onChanged }: { set: ApiEvaluationSet; onChanged: () =>
   const visible = cases.filter((item) => filter === 'all' || (filter === 'needs_standard' ? item.readiness === 'needs_standard' : results[item.id] && !results[item.id].passed));
 
   const alive = useRef(true);
-  useEffect(() => () => { alive.current = false; }, []);
+  useEffect(() => { alive.current = true; return () => { alive.current = false; }; }, []);
   const interrupted = lastRun?.status === 'running' && !running ? lastRun : null;
   const run = async (resume?: ApiEvaluationRun) => {
     setRunning(true);
