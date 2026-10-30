@@ -10,7 +10,7 @@ const NAV = [
   { to: '/tools', label: '工具', icon: Wrench },
   { to: '/insights', label: '看板', icon: BarChart3 },
   { to: '/observability', label: '可观测', icon: Activity },
-  { to: '/evaluation-sets', label: '评测集', icon: ClipboardCheck },
+  { to: '/evaluation-sets', label: '评测', icon: ClipboardCheck },
 ];
 
 export function Shell({ children, bare }: PropsWithChildren<{ bare?: boolean }>) {

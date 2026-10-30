@@ -1,10 +1,11 @@
 import {
   ArrowRight, CheckCircle2, ClipboardCheck, CopyPlus, Filter, FolderPlus, MessageSquareText, Plus, Search,
-  ShieldAlert, Sparkles, ThumbsDown, ThumbsUp,
+  FlaskConical, Scale, ShieldAlert, Sparkles, ThumbsDown, ThumbsUp, Wrench,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Drawer, Field, Modal, Tag, useToast } from '../components/ui';
+import { Dev, Drawer, Field, Modal, Tag, useToast } from '../components/ui';
+import { ExperimentsView, GradersView, SkillTestsView } from './EvalLabViews';
 import {
   createEvaluationSet, getEvaluationState, moveEvaluationCases, updateEvaluationCase,
   type EvaluationCase, type EvaluationSet,
@@ -12,13 +13,36 @@ import {
 
 type CaseFilter = 'all' | 'good' | 'bad' | 'needs_standard';
 
+const VIEWS = [
+  { key: 'sets', name: '评测集', icon: ClipboardCheck },
+  { key: 'experiments', name: '对比实验', icon: FlaskConical },
+  { key: 'graders', name: '评测器', icon: Scale },
+  { key: 'skills', name: 'Skill 单测', icon: Wrench },
+] as const;
+type ViewKey = (typeof VIEWS)[number]['key'];
+
+/** 评测：评测集（Case 资产）→ 对比实验（模型 / 提示词 / Skill / Agent）→ 评测器（怎样算通过）→ Skill 单测（工具本身是否正常）。 */
+export function EvaluationSetsPage() {
+  const [params, setParams] = useSearchParams();
+  const view = (VIEWS.some((item) => item.key === params.get('view')) ? params.get('view') : 'sets') as ViewKey;
+  return (
+    <div className="eval-page">
+      <div className="row" style={{ marginBottom: 6 }}><h1 style={{ fontSize: 20, fontWeight: 650 }}>评测</h1><Tag tone="orange">原型演示数据</Tag><Dev s="partial" note="评测集与规则判定已有" /></div>
+      <nav className="lab-tabs" aria-label="评测视图">
+        {VIEWS.map(({ key, name, icon: Icon }) => <button key={key} className={view === key ? 'active' : ''} onClick={() => setParams(key === 'sets' ? {} : { view: key })}><Icon size={15} />{name}</button>)}
+      </nav>
+      {view === 'sets' ? <SetsView /> : view === 'experiments' ? <ExperimentsView /> : view === 'graders' ? <GradersView /> : <SkillTestsView />}
+    </div>
+  );
+}
+
 function readinessTag(item: EvaluationCase) {
   if (item.readiness === 'ready') return <Tag tone="green"><CheckCircle2 size={12} />可运行</Tag>;
   if (item.readiness === 'needs_standard') return <Tag tone="orange"><ShieldAlert size={12} />待补标准</Tag>;
   return <Tag>草稿</Tag>;
 }
 
-export function EvaluationSetsPage() {
+function SetsView() {
   const navigate = useNavigate();
   const toast = useToast();
   const [params, setParams] = useSearchParams();
@@ -48,9 +72,9 @@ export function EvaluationSetsPage() {
   const toggleAll = () => setSelected(selected.length === activeCases.length ? [] : activeCases.map((item) => item.id));
 
   return (
-    <div className="eval-page">
+    <>
       <header className="eval-head">
-        <div className="grow"><div className="row"><h1>评测集</h1><Tag tone="orange">原型演示数据</Tag></div><p>把线上 Good Case 与 Bad Case 回流为可重复运行的质量资产。</p></div>
+        <div className="grow"><p>把线上 Good Case 与 Bad Case 回流为可重复运行的质量资产。</p></div>
         <button className="btn" onClick={() => navigate('/observability?view=conversations')}><MessageSquareText size={15} />从线上日志回流</button>
         <button className="btn primary" onClick={() => setCreating(true)}><FolderPlus size={15} />新建评测集</button>
       </header>
@@ -100,7 +124,7 @@ export function EvaluationSetsPage() {
       <CreateSetModal open={creating} onClose={() => setCreating(false)} onCreated={(set) => { setCreating(false); refresh(); selectSet(set.id); toast(`已创建评测集「${set.name}」`); }} />
       <MoveCasesModal open={moving} sets={state.sets.filter((item) => item.id !== activeSetId)} count={selected.length} onClose={() => setMoving(false)} onMove={(setId) => { moveEvaluationCases(selected, setId); setMoving(false); setSelected([]); refresh(); toast(`已移动 ${selected.length} 条 Case`); }} />
       <CaseDrawer key={caseDetail?.id ?? 'closed'} item={caseDetail} onClose={() => setCaseDetail(null)} onSaved={() => { setCaseDetail(null); refresh(); }} />
-    </div>
+    </>
   );
 }
 
